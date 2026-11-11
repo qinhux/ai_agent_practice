@@ -1,0 +1,47 @@
+x-database-url: &database-url postgresql://agent:agent_dev@db:5432/agent
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent_dev
+      POSTGRES_DB: agent
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "agent", "-d", "agent"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      target: app
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      DATABASE_URL: *database-url
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

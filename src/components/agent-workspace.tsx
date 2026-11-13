@@ -1,7 +1,8 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { ArrowUp, Bot, Clock3, LogOut, Plus, Square } from "lucide-react";
+import { ArrowUp, Bot, Clock3, Download, FileText, ImageIcon, LogOut, Plus, Square } from "lucide-react";
+import Image from "next/image";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AuthForm } from "@/components/auth-form";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,8 @@ import type { AgentMessage } from "@/server/agent";
 import { useChatStore } from "@/stores/chat-store";
 
 const examplePrompt = "现在上海几点？请查询当前时间。";
+const presentationExample = "做一份 8 页的武汉城市介绍 PPT，面向第一次来武汉的游客。";
+const imageExample = "生成一张方形插画，画一只在窗边晒太阳的橘猫。";
 
 function Chat() {
   const { messages, sendMessage, status, stop, error, clearError, setMessages } =
@@ -55,9 +58,17 @@ function Chat() {
           <div className="grid h-full min-h-44 place-content-center justify-items-center gap-4 text-center">
             <Bot aria-hidden="true" className="size-12 rounded-2xl bg-accent p-2.5 text-primary" />
             <h2 className="text-xl font-semibold">开始一段对话</h2>
-            <Button variant="outline" onClick={() => setDraft(examplePrompt)}>
-              <Clock3 aria-hidden="true" /> 查询上海时间
-            </Button>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="outline" onClick={() => setDraft(examplePrompt)}>
+                <Clock3 aria-hidden="true" /> 查询上海时间
+              </Button>
+              <Button variant="outline" onClick={() => setDraft(presentationExample)}>
+                <FileText aria-hidden="true" /> 试试生成 PPT
+              </Button>
+              <Button variant="outline" onClick={() => setDraft(imageExample)}>
+                <ImageIcon aria-hidden="true" /> 试试生成图片
+              </Button>
+            </div>
           </div>
         )}
         <div className="space-y-5" role="log" aria-label="对话消息" aria-live="off">
@@ -83,6 +94,66 @@ function Chat() {
                         : part.state === "output-available"
                           ? "已调用时间查询工具"
                           : "正在查询时间…"}
+                    </p>
+                  );
+                }
+                if (part.type === "tool-generateImage") {
+                  if (part.state === "output-available" && "id" in part.output) {
+                    const url = `/api/images/${encodeURIComponent(part.output.id)}`;
+                    return (
+                      <div key={index} className="space-y-2">
+                        <Image
+                          src={url}
+                          alt={part.input?.prompt || "生成的图片"}
+                          unoptimized
+                          width={480}
+                          height={480}
+                          className="h-auto max-h-[28rem] w-auto max-w-full rounded-lg object-contain"
+                        />
+                        <Button asChild variant="outline" className="h-8 px-3 text-xs">
+                          <a href={url} download="generated-image.jpg">
+                            <Download aria-hidden="true" /> 下载图片
+                          </a>
+                        </Button>
+                      </div>
+                    );
+                  }
+                  const failed = part.state === "output-error" || part.state === "output-denied";
+                  return (
+                    <p key={index} role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <ImageIcon aria-hidden="true" className="size-3.5" />
+                      {part.state === "output-available" && "error" in part.output
+                        ? part.output.error
+                        : failed ? "图片生成失败，请稍后重试。" : busy ? "正在生成图片…" : "图片生成已中断。"}
+                    </p>
+                  );
+                }
+                if (part.type === "tool-generatePresentation") {
+                  if (part.state === "output-available" && "id" in part.output) {
+                    const { id, title, slideCount, fallbackImageCount } = part.output;
+                    return (
+                      <div key={index} className="flex flex-wrap items-center gap-3 rounded-lg bg-secondary px-3 py-2">
+                        <FileText aria-hidden="true" className="size-4 shrink-0" />
+                        <span className="wrap-anywhere">{title} · {slideCount} 页</span>
+                        <Button asChild variant="outline" className="h-8 px-3 text-xs">
+                          <a href={`/api/presentations/${encodeURIComponent(id)}`} download>
+                            <Download aria-hidden="true" /> 下载 PPT
+                          </a>
+                        </Button>
+                        {Boolean(fallbackImageCount) && (
+                          <p className="basis-full text-xs text-muted-foreground">
+                            {fallbackImageCount} 页使用了备用配图
+                          </p>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  const finished = part.state === "output-error" || part.state === "output-available" || part.state === "output-denied";
+                  return (
+                    <p key={index} role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <FileText aria-hidden="true" className="size-3.5" />
+                      {finished ? "PPT 生成失败，请稍后重试。" : busy ? "正在生成 PPT…" : "PPT 生成已中断。"}
                     </p>
                   );
                 }

@@ -15,9 +15,9 @@ export async function POST(request: Request) {
     return new Response("请先登录。", { status: 401 });
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    return new Response("请在服务端配置 OPENAI_API_KEY。", { status: 503 });
+    return new Response("请在服务端配置 DEEPSEEK_API_KEY。", { status: 503 });
   }
 
   const body = await request.text();
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
     return new Response("对话格式无效或消息过多。", { status: 400 });
   }
 
-  const agent = createAgent(apiKey);
+  const agent = createAgent(apiKey, session.user.id);
   const result = await safeValidateUIMessages<AgentMessage>({ messages, tools: agent.tools });
   const lastMessage = result.success ? result.data.at(-1) : undefined;
   if (!result.success || lastMessage?.role !== "user" || !lastMessage.parts.some(
@@ -57,7 +57,7 @@ export async function POST(request: Request) {
       ignoreIncompleteToolCalls: true,
     }),
     abortSignal: request.signal,
-    timeout: 60_000,
+    timeout: 270_000,
   });
 
   return stream.toUIMessageStreamResponse({

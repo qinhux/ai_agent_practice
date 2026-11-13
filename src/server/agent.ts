@@ -1,37 +1,26 @@
-import { createOpenAI } from "@ai-sdk/openai";
-import { stepCountIs, tool, ToolLoopAgent, type InferAgentUIMessage } from "ai";
-import { z } from "zod";
+import { createDeepSeek, type DeepSeekLanguageModelOptions } from "@ai-sdk/deepseek";
+import { stepCountIs, ToolLoopAgent, type InferAgentUIMessage } from "ai";
+import { createImageTool } from "./image-tool";
+import { createPresentationTool } from "./presentation-tool";
+import { getCurrentTime } from "./time-tool";
 
-const getCurrentTime = tool({
-  description: "Look up the current time in an IANA time zone such as Asia/Shanghai.",
-  inputSchema: z.object({
-    timeZone: z.string().min(1).max(100).describe("IANA time zone"),
-  }),
-  execute: async ({ timeZone }) => {
-    try {
-      const now = new Date();
-      const localTime = new Intl.DateTimeFormat("zh-CN", {
-        dateStyle: "full",
-        timeStyle: "long",
-        timeZone,
-      }).format(now);
+const providerOptions = {
+  deepseek: { thinking: { type: "disabled" } } satisfies DeepSeekLanguageModelOptions,
+};
 
-      return { timeZone, localTime, utcTime: now.toISOString() };
-    } catch (error) {
-      if (!(error instanceof RangeError)) throw error;
-      return { error: "Invalid IANA time zone.", timeZone };
-    }
-  },
-});
-
-export function createAgent(apiKey: string) {
-  const openai = createOpenAI({ apiKey });
+export function createAgent(apiKey: string, userId: string) {
+  const deepseek = createDeepSeek({ apiKey });
+  const model = deepseek(process.env.DEEPSEEK_MODEL || "deepseek-flash");
 
   return new ToolLoopAgent({
-    model: openai(process.env.OPENAI_MODEL || "gpt-4.1-mini"),
-    instructions: "You are a helpful assistant. Reply in the user's language. Use getCurrentTime for questions about the current time.",
-    tools: { getCurrentTime },
-    providerOptions: { openai: { store: false } },
+    model,
+    instructions: "You are a helpful assistant. Reply in the user's language. Use getCurrentTime for questions about the current time. Use generateImage for standalone image requests and refer to the image preview in chat when it succeeds. When the user wants a PowerPoint file, use generatePresentation and pass the relevant conversation context. That tool generates slide illustrations itself. Leave slideCount unset unless the user specified it in the relevant conversation. After PowerPoint generation, briefly report the result and refer to the download button in the chat. If a generation tool fails, report its error and wait for the user to retry.",
+    tools: {
+      getCurrentTime,
+      generateImage: createImageTool(userId),
+      generatePresentation: createPresentationTool(model, userId, providerOptions),
+    },
+    providerOptions,
     maxOutputTokens: 2048,
     stopWhen: stepCountIs(5),
   });

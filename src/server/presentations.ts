@@ -20,7 +20,7 @@ const title = slideText(50);
 const points = slidePoints(4, 90);
 // 双栏页中的一栏，包含栏标题 heading 和该栏的 points。栏标题最多 26 个字符，每条要点最多 60 个字符，校验后保留前 3 条。
 const column = z.object({ heading: slideText(26), points: slidePoints(3, 60) });
-const imageBrief = slideText(280);
+const imageBrief = slideText(280).nullish();
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
 const slide = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("cover"), title, subtitle: slideText(90).optional(), imageBrief }),
@@ -62,7 +62,7 @@ export async function preparePresentationImages(
   style: z.infer<typeof presentationStyles>,
   signal?: AbortSignal,
 ) {
-  const images: { bytes: Buffer; fallback: boolean }[] = new Array(presentation.slides.length);
+  const images: ({ bytes: Buffer; fallback: boolean } | undefined)[] = new Array(presentation.slides.length);
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
   const visualStyle = {
     professional: "editorial illustration, refined cool palette",
@@ -75,6 +75,8 @@ export async function preparePresentationImages(
       signal?.throwIfAborted();
       const index = nextIndex++;
       const page = presentation.slides[index];
+      if (!page.imageBrief) continue;
+
       const box = imageBoxes[page.layout];
       const width = Math.round(box.w * 135);
       const height = Math.round(box.h * 135);
@@ -114,20 +116,23 @@ export async function renderPresentation(
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
     const image = images[index];
-    if (!image) throw new Error(`Missing image for slide ${index + 1}.`);
-    slide.addImage({
-      data: `image/jpeg;base64,${image.bytes.toString("base64")}`,
-      ...imageBoxes[page.layout],
-      altText: image.fallback ? "装饰插图" : page.imageBrief,
-    });
+    if (image) {
+      slide.addImage({
+        data: `image/jpeg;base64,${image.bytes.toString("base64")}`,
+        ...imageBoxes[page.layout],
+        altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
+      });
+    }
     if (page.layout === "cover") {
       slide.background = { color: theme.cover };
+      const width = image ? 5.4 : 11.6;
       slide.addText(page.title, {
-        ...textOptions, x: 0.85, y: 1.52, w: 5.4, h: 2.55, fontSize: 40, bold: true, color: theme.light,
+        ...textOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
+        h: 2.55, fontSize: 40, bold: true, color: theme.light,
       });
       if (page.subtitle) {
         slide.addText(page.subtitle, {
-          ...textOptions, x: 0.85, y: 4.23, w: 5.4, h: 1.45, fontSize: 20, color: theme.light,
+          ...textOptions, x: 0.85, y: 4.23, w: width, h: 1.45, fontSize: 20, color: theme.light,
         });
       }
       continue;
@@ -139,13 +144,15 @@ export async function renderPresentation(
     });
 
     if (page.layout === "two-columns") {
+      const headingY = image ? 4.11 : 1.94;
+      const pointSpacing = image ? 0.76 : 1.24;
       for (const [column, x] of [[page.left, 0.85], [page.right, 7.0]] as const) {
         slide.addText(column.heading, {
-          ...textOptions, x, y: 4.11, w: 5.4, h: 0.55, fontSize: 20, bold: true, color: theme.accent,
+          ...textOptions, x, y: headingY, w: 5.4, h: 0.55, fontSize: 20, bold: true, color: theme.accent,
         });
         column.points.forEach((point, index) => {
           slide.addText(point, {
-            ...textOptions, x, y: 4.73 + 0.76 * index, w: 5.4, h: 0.74,
+            ...textOptions, x, y: headingY + 0.62 + pointSpacing * index, w: 5.4, h: pointSpacing - 0.02,
             fontSize: 17, color: theme.ink, bullet: { indent: 17 },
           });
         });
@@ -155,7 +162,7 @@ export async function renderPresentation(
 
     page.points.forEach((point, index) => {
       slide.addText(point, {
-        ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: 6.2, h: 1.17,
+        ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: image ? 6.2 : 11.6, h: 1.17,
         fontSize: 20, color: theme.ink, bullet: { indent: 19 },
       });
     });

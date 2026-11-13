@@ -28,11 +28,11 @@ async function writePresentation(
         providerOptions,
         output: Output.json(),
         system: `Write an audience-appropriate PowerPoint in the language specified in the brief, or infer it from the topic. Return only a JSON object with a title (up to 60 characters) and a slides array with exactly ${slideCount} entries. Use these slide structures:
-{"layout":"cover","title":"...","subtitle":"...","imageBrief":"..."}
-{"layout":"bullets","title":"...","points":["..."],"imageBrief":"..."}
-{"layout":"two-columns","title":"...","left":{"heading":"...","points":["..."]},"right":{"heading":"...","points":["..."]},"imageBrief":"..."}
-{"layout":"summary","title":"...","points":["..."],"imageBrief":"..."}
-Slide titles are limited to 50 characters, the optional subtitle to 90, and column headings to 26. A bullets or summary slide has 1–4 points of at most 90 characters each. Each column has 1–3 points of at most 60 characters each. Keep each point concise so it fits alongside an image. Every slide must have a distinct imageBrief (up to 280 characters) describing an illustration that supports the slide, including a concrete subject and composition. Ask for a standalone illustration without lettering, slide text, charts, or invented evidence. Use plain single-line text. A one-slide deck should present the main content. For larger decks use a cover when appropriate, and place it first. Use supplied material faithfully and avoid inventing statistics, quotes, or sources.${correction}`,
+{"layout":"cover","title":"...","subtitle":"..."}
+{"layout":"bullets","title":"...","points":["..."]}
+{"layout":"two-columns","title":"...","left":{"heading":"...","points":["..."]},"right":{"heading":"...","points":["..."]}}
+{"layout":"summary","title":"...","points":["..."]}
+Slide titles are limited to 50 characters, the optional subtitle to 90, and column headings to 26. A bullets or summary slide has 1–4 points of at most 90 characters each. Each column has 1–3 points of at most 60 characters each. Keep each point concise. Decide independently for each slide whether an illustration would help the audience understand or visualize its subject, and follow any image preferences in the brief. Any layout can be used with or without an image. For a slide that benefits from an image, add an optional imageBrief (up to 280 characters) describing a distinct, concrete subject and composition. Ask for a standalone illustration without lettering, slide text, charts, or invented evidence. Omit imageBrief when text communicates the content clearly on its own, such as for many agendas, comparisons, or summaries. A deck may have no images. Use plain single-line text. A one-slide deck should present the main content. For larger decks use a cover when appropriate, and place it first. Use supplied material faithfully and avoid inventing statistics, quotes, or sources.${correction}`,
         prompt: brief,
         temperature: 0.3,
         maxOutputTokens: 6000,
@@ -88,7 +88,7 @@ export function createPresentationTool(model: LanguageModel, userId: string, pro
         return {
           ...presentation,
           slideCount: output.slides.length,
-          fallbackImageCount: images.filter((image) => image.fallback).length,
+          fallbackImageCount: images.filter((image) => image?.fallback).length,
         };
       } catch (error) {
         abortSignal?.throwIfAborted();

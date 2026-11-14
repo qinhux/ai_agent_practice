@@ -37,9 +37,26 @@ model Presentation {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   title     String
   bytes     Bytes
+  source    Json?
+  images    PresentationImage[]
+  parentId  String?
+  parent    Presentation?  @relation("PresentationVersions", fields: [parentId], references: [id], onDelete: SetNull)
+  revisions Presentation[] @relation("PresentationVersions")
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([parentId])
+}
+
+model PresentationImage {
+  presentationId String
+  presentation   Presentation @relation(fields: [presentationId], references: [id], onDelete: Cascade)
+  slideId        String
+  bytes          Bytes
+  box            Json
+  fallback       Boolean
+
+  @@id([presentationId, slideId])
 }
 
 model Session {

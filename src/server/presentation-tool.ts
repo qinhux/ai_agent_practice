@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { generateText, NoObjectGeneratedError, Output, tool, type LanguageModel } from "ai";
 import { z } from "zod";
 import { getPrisma } from "./db";
@@ -79,26 +80,43 @@ export function createPresentationTool(model: LanguageModel, userId: string, pro
     }),
     execute: async ({ slideCount = defaultSlideCount, ...brief }, { abortSignal }) => {
       try {
-        const output = await writePresentation(
+        const content = await writePresentation(
           model,
           providerOptions,
           JSON.stringify({ ...brief, slideCount }),
           slideCount,
           abortSignal,
         );
-        const slideColors = getSlideColors(output);
-        const images = await preparePresentationImages(output, abortSignal);
-        const bytes = await renderPresentation(output, slideColors, images);
+        const source = {
+          ...content,
+          slides: content.slides.map((slide) => ({ ...slide, slideId: randomUUID() })),
+        };
+        const slideColors = getSlideColors(source);
+        const images = await preparePresentationImages(source, abortSignal);
+        const bytes = await renderPresentation(source, slideColors, images);
         abortSignal?.throwIfAborted();
         const presentation = await getPrisma().presentation.create({
-          data: { userId, title: output.title, bytes },
+          data: {
+            userId,
+            title: source.title,
+            bytes,
+            source,
+            images: {
+              create: Array.from(images, ([slideId, image]) => ({
+                slideId,
+                bytes: new Uint8Array(image.bytes),
+                box: image.box,
+                fallback: image.fallback,
+              })),
+            },
+          },
           select: { id: true, title: true },
         });
 
         return {
           ...presentation,
-          slideCount: output.slides.length,
-          fallbackImageCount: images.filter((image) => image?.fallback).length,
+          slideCount: source.slides.length,
+          fallbackImageCount: Array.from(images.values()).filter((image) => image.fallback).length,
         };
       } catch (error) {
         abortSignal?.throwIfAborted();

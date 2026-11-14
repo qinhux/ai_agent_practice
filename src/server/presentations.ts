@@ -62,6 +62,9 @@ export const presentationSchema = z.object({
 });
 
 type Presentation = z.infer<typeof presentationSchema>;
+type PresentationSource = Omit<Presentation, "slides"> & {
+  slides: (Presentation["slides"][number] & { slideId: string })[];
+};
 type SlideColors = { background: string; text: string; accent: string };
 
 export function getSlideColors({ slides, palette }: Presentation): SlideColors[] {
@@ -104,11 +107,17 @@ async function fallbackImage(width: number, height: number, index: number) {
   return sharp(Buffer.from(svg)).jpeg({ quality: 86 }).toBuffer();
 }
 
+// DrawingML alpha represents opacity in thousandths of a percent.
+const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
+  '<a:gs pos="0"><a:srgbClr val="000000"><a:alpha val="70000"/></a:srgbClr></a:gs>' +
+  '<a:gs pos="100000"><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:gs>' +
+  '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
+
 export async function preparePresentationImages(
-  { slides }: Pick<Presentation, "slides">,
+  { slides }: Pick<PresentationSource, "slides">,
   signal?: AbortSignal,
 ) {
-  const images: (PresentationImage | undefined)[] = new Array(slides.length);
+  const images = new Map<string, PresentationImage>();
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
   let nextIndex = 0;
   async function worker() {
@@ -140,7 +149,7 @@ export async function preparePresentationImages(
             fit: "cover",
             position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
           }).jpeg({ quality: 87 }).toBuffer();
-          images[index] = { bytes, box, fallback: false };
+          images.set(page.slideId, { bytes, box, fallback: false });
           continue;
         } catch (error) {
           signal?.throwIfAborted();
@@ -149,7 +158,7 @@ export async function preparePresentationImages(
       }
       const { w, h } = sideOrContentBox;
       const bytes = await fallbackImage(Math.round(w * 135), Math.round(h * 135), index);
-      images[index] = { bytes, box: sideOrContentBox, fallback: true };
+      images.set(page.slideId, { bytes, box: sideOrContentBox, fallback: true });
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
@@ -158,29 +167,38 @@ export async function preparePresentationImages(
 }
 
 export async function renderPresentation(
-  presentation: Presentation,
+  presentation: PresentationSource,
   slideColors: SlideColors[],
-  images: Awaited<ReturnType<typeof preparePresentationImages>>,
+  images: ReadonlyMap<string, PresentationImage>,
 ) {
   const pptx = new pptxgen();
   pptx.layout = "LAYOUT_WIDE";
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
   const titleOptions = { ...textOptions, fontFace: "Georgia", bold: true } as const;
+  const slidesWithGradient = new Set<string>();
 
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
     const colors = slideColors[index];
     slide.background = { color: colors.background };
-    const image = images[index];
+    const image = images.get(page.slideId);
     const hasFirstSlideImage = index === 0 && Boolean(image);
-    const hasFullSlideImage = image?.box === fullSlideImageBox;
+    const hasFullSlideImage = image?.box.w === fullSlideImageBox.w && image.box.h === fullSlideImageBox.h;
     if (image) {
       slide.addImage({
         data: `image/jpeg;base64,${image.bytes.toString("base64")}`,
         ...image.box,
         altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
       });
+      if (image.box.y === 0 && image.box.h === fullSlideImageBox.h) {
+        slide.addShape(pptx.ShapeType.rect, {
+          ...image.box,
+          objectName: "渐变遮罩",
+          line: { transparency: 100 },
+        });
+        slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
+      }
     }
     if (page.layout === "cover") {
       const width = hasFirstSlideImage ? firstSlideTextWidth : image ? 5.4 : 11.6;
@@ -236,12 +254,18 @@ export async function renderPresentation(
   if (!Buffer.isBuffer(bytes)) throw new TypeError("Expected PowerPoint output as a Node buffer.");
 
   const archive = await JSZip.loadAsync(bytes);
-  // PptxGenJS writes fontFace to every script. Set the East Asian font independently.
   await Promise.all(archive.file(/^ppt\/slides\/slide\d+\.xml$/).map(async (part) => {
-    const xml = await part.async("string");
-    archive.file(part.name, xml
+    // PptxGenJS writes fontFace to every script. Set the East Asian font independently.
+    let xml = (await part.async("string"))
       .replaceAll('<a:ea typeface="Georgia"', '<a:ea typeface="Songti SC"')
-      .replaceAll('<a:ea typeface="Arial"', '<a:ea typeface="Microsoft YaHei"'));
+      .replaceAll('<a:ea typeface="Arial"', '<a:ea typeface="Microsoft YaHei"');
+    if (slidesWithGradient.has(part.name)) {
+      // PptxGenJS cannot set a gradient fill on a shape through its public API.
+      const maskFill = /(<p:sp><p:nvSpPr><p:cNvPr id="\d+" name="渐变遮罩">[\s\S]*?<\/a:prstGeom>)<a:noFill\/>/;
+      if (!maskFill.test(xml)) throw new Error("Missing PowerPoint gradient mask shape.");
+      xml = xml.replace(maskFill, (_, shape: string) => shape + imageGradientFill);
+    }
+    archive.file(part.name, xml);
   }));
 
   // PptxGenJS 4.0.1 declares a slide master for each slide, but writes only one (issue #1444).

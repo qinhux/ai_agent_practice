@@ -80,7 +80,8 @@ export function getSlideColors({ slides, palette }: Presentation): SlideColors[]
 }
 
 // LAYOUT_WIDE measures 13⅓ × 7½ inches.
-const firstSlideImageBox = { x: 7.5, y: 0, w: 40 / 3 - 7.5, h: 7.5 };
+const fullSlideImageBox = { x: 0, y: 0, w: 40 / 3, h: 7.5 };
+const firstSlideSideImageBox = { x: 7.5, y: 0, w: fullSlideImageBox.w - 7.5, h: fullSlideImageBox.h };
 const firstSlideTextWidth = 6.2;
 
 const imageBoxes = {
@@ -89,6 +90,9 @@ const imageBoxes = {
   "two-columns": { x: 0.85, y: 1.73, w: 11.63, h: 2.22 },
   summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
 } as const;
+
+type ImageBox = { x: number; y: number; w: number; h: number };
+type PresentationImage = { bytes: Buffer; box: ImageBox; fallback: boolean };
 
 async function fallbackImage(width: number, height: number, index: number) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 1000 1000" preserveAspectRatio="none">
@@ -104,7 +108,7 @@ export async function preparePresentationImages(
   { slides }: Pick<Presentation, "slides">,
   signal?: AbortSignal,
 ) {
-  const images: ({ bytes: Buffer; fallback: boolean } | undefined)[] = new Array(slides.length);
+  const images: (PresentationImage | undefined)[] = new Array(slides.length);
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
   let nextIndex = 0;
   async function worker() {
@@ -115,26 +119,37 @@ export async function preparePresentationImages(
       if (!page.imageBrief) continue;
 
       const isFirstSlide = index === 0;
-      const box = isFirstSlide ? firstSlideImageBox : imageBoxes[page.layout];
-      const width = Math.round(box.w * 135);
-      const height = Math.round(box.h * 135);
+      const sideOrContentBox = isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout];
       if (configured) {
         try {
-          const aspectRatio = isFirstSlide ? "9:16" : page.layout === "two-columns" ? "16:9" : "1:1";
+          const aspectRatio = isFirstSlide || page.layout === "two-columns" ? "16:9" : "1:1";
           const composition = isFirstSlide
-            ? "Use a vertical composition and keep the main subject away from the top and bottom edges."
+            ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
             : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
           const prompt = `${page.imageBrief}. No text, captions, or presentation layout. ${composition}`;
           const image = await generateImageAsset(prompt, aspectRatio, signal);
-          const bytes = await sharp(image).resize(width, height, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
-          images[index] = { bytes, fallback: false };
+          const source = sharp(image);
+          let box = sideOrContentBox;
+          if (isFirstSlide) {
+            const { width, height } = await source.metadata();
+            const slideAspect = fullSlideImageBox.w / fullSlideImageBox.h;
+            // Allow minor provider rounding (e.g. 1696 × 960 for a 16:9 request).
+            if (Math.abs(width / height / slideAspect - 1) <= 0.02) box = fullSlideImageBox;
+          }
+          const bytes = await source.resize(Math.round(box.w * 135), Math.round(box.h * 135), {
+            fit: "cover",
+            position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
+          }).jpeg({ quality: 87 }).toBuffer();
+          images[index] = { bytes, box, fallback: false };
           continue;
         } catch (error) {
           signal?.throwIfAborted();
           console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
         }
       }
-      images[index] = { bytes: await fallbackImage(width, height, index), fallback: true };
+      const { w, h } = sideOrContentBox;
+      const bytes = await fallbackImage(Math.round(w * 135), Math.round(h * 135), index);
+      images[index] = { bytes, box: sideOrContentBox, fallback: true };
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
@@ -150,7 +165,8 @@ export async function renderPresentation(
   const pptx = new pptxgen();
   pptx.layout = "LAYOUT_WIDE";
   pptx.title = presentation.title;
-  const textOptions = { fontFace: "Microsoft YaHei", margin: 0, valign: "middle", fit: "shrink" } as const;
+  const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
+  const titleOptions = { ...textOptions, fontFace: "Georgia", bold: true } as const;
 
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
@@ -158,18 +174,19 @@ export async function renderPresentation(
     slide.background = { color: colors.background };
     const image = images[index];
     const hasFirstSlideImage = index === 0 && Boolean(image);
+    const hasFullSlideImage = image?.box === fullSlideImageBox;
     if (image) {
       slide.addImage({
         data: `image/jpeg;base64,${image.bytes.toString("base64")}`,
-        ...(hasFirstSlideImage ? firstSlideImageBox : imageBoxes[page.layout]),
+        ...image.box,
         altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
       });
     }
     if (page.layout === "cover") {
       const width = hasFirstSlideImage ? firstSlideTextWidth : image ? 5.4 : 11.6;
       slide.addText(page.title, {
-        ...textOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
-        h: 2.55, fontSize: 40, bold: true, color: colors.text,
+        ...titleOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
+        h: 2.55, fontSize: 40, color: colors.text,
       });
       if (page.subtitle) {
         slide.addText(page.subtitle, {
@@ -180,12 +197,13 @@ export async function renderPresentation(
     }
 
     slide.addText(page.title, {
-      ...textOptions, x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6,
-      h: 1.15, fontSize: 32, bold: true, color: colors.text,
+      ...titleOptions, x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6,
+      h: 1.15, fontSize: 32, color: colors.text,
     });
 
     if (page.layout === "two-columns") {
-      const headingColor = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
+      const headingColor = !hasFullSlideImage && contrastRatio(colors.accent, colors.background) >= 4.5
+        ? colors.accent : colors.text;
       const hasImageAboveColumns = image && !hasFirstSlideImage;
       const headingY = hasImageAboveColumns ? 4.11 : 1.94;
       const pointSpacing = hasImageAboveColumns ? 0.76 : 1.24;
@@ -217,8 +235,16 @@ export async function renderPresentation(
   const bytes = await pptx.write({ outputType: "nodebuffer" });
   if (!Buffer.isBuffer(bytes)) throw new TypeError("Expected PowerPoint output as a Node buffer.");
 
-  // PptxGenJS 4.0.1 declares a slide master for each slide, but writes only one (issue #1444).
   const archive = await JSZip.loadAsync(bytes);
+  // PptxGenJS writes fontFace to every script. Set the East Asian font independently.
+  await Promise.all(archive.file(/^ppt\/slides\/slide\d+\.xml$/).map(async (part) => {
+    const xml = await part.async("string");
+    archive.file(part.name, xml
+      .replaceAll('<a:ea typeface="Georgia"', '<a:ea typeface="Songti SC"')
+      .replaceAll('<a:ea typeface="Arial"', '<a:ea typeface="Microsoft YaHei"'));
+  }));
+
+  // PptxGenJS 4.0.1 declares a slide master for each slide, but writes only one (issue #1444).
   const manifest = archive.file("[Content_Types].xml");
   if (!manifest) throw new Error("Missing PowerPoint content types.");
   const contentTypes = await manifest.async("string");

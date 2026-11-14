@@ -79,6 +79,10 @@ export function getSlideColors({ slides, palette }: Presentation): SlideColors[]
   });
 }
 
+// LAYOUT_WIDE measures 13⅓ × 7½ inches.
+const firstSlideImageBox = { x: 7.5, y: 0, w: 40 / 3 - 7.5, h: 7.5 };
+const firstSlideTextWidth = 6.2;
+
 const imageBoxes = {
   cover: { x: 6.66, y: 0.6, w: 5.82, h: 6.3 },
   bullets: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
@@ -110,13 +114,16 @@ export async function preparePresentationImages(
       const page = slides[index];
       if (!page.imageBrief) continue;
 
-      const box = imageBoxes[page.layout];
+      const isFirstSlide = index === 0;
+      const box = isFirstSlide ? firstSlideImageBox : imageBoxes[page.layout];
       const width = Math.round(box.w * 135);
       const height = Math.round(box.h * 135);
       if (configured) {
         try {
-          const aspectRatio = page.layout === "two-columns" ? "16:9" : "1:1";
-          const composition = page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
+          const aspectRatio = isFirstSlide ? "9:16" : page.layout === "two-columns" ? "16:9" : "1:1";
+          const composition = isFirstSlide
+            ? "Use a vertical composition and keep the main subject away from the top and bottom edges."
+            : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
           const prompt = `${page.imageBrief}. No text, captions, or presentation layout. ${composition}`;
           const image = await generateImageAsset(prompt, aspectRatio, signal);
           const bytes = await sharp(image).resize(width, height, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
@@ -150,15 +157,16 @@ export async function renderPresentation(
     const colors = slideColors[index];
     slide.background = { color: colors.background };
     const image = images[index];
+    const hasFirstSlideImage = index === 0 && Boolean(image);
     if (image) {
       slide.addImage({
         data: `image/jpeg;base64,${image.bytes.toString("base64")}`,
-        ...imageBoxes[page.layout],
+        ...(hasFirstSlideImage ? firstSlideImageBox : imageBoxes[page.layout]),
         altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
       });
     }
     if (page.layout === "cover") {
-      const width = image ? 5.4 : 11.6;
+      const width = hasFirstSlideImage ? firstSlideTextWidth : image ? 5.4 : 11.6;
       slide.addText(page.title, {
         ...textOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
         h: 2.55, fontSize: 40, bold: true, color: colors.text,
@@ -172,20 +180,25 @@ export async function renderPresentation(
     }
 
     slide.addText(page.title, {
-      ...textOptions, x: 0.85, y: 0.5, w: 11.6, h: 1.15, fontSize: 32, bold: true, color: colors.text,
+      ...textOptions, x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6,
+      h: 1.15, fontSize: 32, bold: true, color: colors.text,
     });
 
     if (page.layout === "two-columns") {
       const headingColor = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
-      const headingY = image ? 4.11 : 1.94;
-      const pointSpacing = image ? 0.76 : 1.24;
-      for (const [column, x] of [[page.left, 0.85], [page.right, 7.0]] as const) {
+      const hasImageAboveColumns = image && !hasFirstSlideImage;
+      const headingY = hasImageAboveColumns ? 4.11 : 1.94;
+      const pointSpacing = hasImageAboveColumns ? 0.76 : 1.24;
+      const columnGap = 0.4;
+      const columnWidth = hasFirstSlideImage ? (firstSlideTextWidth - columnGap) / 2 : 5.4;
+      const rightColumnX = hasFirstSlideImage ? 0.85 + columnWidth + columnGap : 7.0;
+      for (const [column, x] of [[page.left, 0.85], [page.right, rightColumnX]] as const) {
         slide.addText(column.heading, {
-          ...textOptions, x, y: headingY, w: 5.4, h: 0.55, fontSize: 20, bold: true, color: headingColor,
+          ...textOptions, x, y: headingY, w: columnWidth, h: 0.55, fontSize: 20, bold: true, color: headingColor,
         });
         column.points.forEach((point, index) => {
           slide.addText(point, {
-            ...textOptions, x, y: headingY + 0.62 + pointSpacing * index, w: 5.4, h: pointSpacing - 0.02,
+            ...textOptions, x, y: headingY + 0.62 + pointSpacing * index, w: columnWidth, h: pointSpacing - 0.02,
             fontSize: 17, color: colors.text, bullet: { indent: 17 },
           });
         });
@@ -195,7 +208,7 @@ export async function renderPresentation(
 
     page.points.forEach((point, index) => {
       slide.addText(point, {
-        ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: image ? 6.2 : 11.6, h: 1.17,
+        ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: image ? firstSlideTextWidth : 11.6, h: 1.17,
         fontSize: 20, color: colors.text, bullet: { indent: 19 },
       });
     });

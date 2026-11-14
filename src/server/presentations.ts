@@ -27,18 +27,57 @@ const slide = z.discriminatedUnion("layout", [
   // 要点列表页。这一页有一个标题，正文在同一栏里逐条列出，每条前面有一个圆点 •
   z.object({ layout: z.literal("bullets"), title, points, imageBrief }),
   z.object({ layout: z.literal("two-columns"), title, left: column, right: column, imageBrief }),
-  z.object({ layout: z.literal("summary"), title, points, imageBrief }),
+  z.object({ layout: z.literal("summary"), title, points, closing: z.boolean().optional().catch(undefined), imageBrief }),
 ]);
 
-// 定义每种页面需要哪些字段
-export const presentationSchema = z.object({ title: slideText(60), slides: z.array(slide) });
-export const presentationStyles = z.enum(["professional", "warm", "minimal"]);
+function luminance(color: string) {
+  const channels = [0, 2, 4].map((offset) => {
+    const channel = Number.parseInt(color.slice(offset, offset + 2), 16) / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
 
-const themes = {
-  professional: { paper: "F7F9FC", ink: "142846", accent: "225AA5", cover: "142846", light: "FFFFFF", summary: "E8F0FA" },
-  warm: { paper: "FFF8F0", ink: "44281D", accent: "9A442B", cover: "663523", light: "FFF8F0", summary: "F6E8DA" },
-  minimal: { paper: "FFFFFF", ink: "212121", accent: "505050", cover: "212121", light: "FFFFFF", summary: "EFEFEF" },
-} satisfies Record<z.infer<typeof presentationStyles>, Record<string, string>>;
+function contrastRatio(first: string, second: string) {
+  const a = luminance(first);
+  const b = luminance(second);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+const defaultPalette = { lightBackground: "F7F9FC", darkBackground: "142846", accent: "225AA5" };
+const hexColor = z.string().trim().regex(/^#?[0-9a-fA-F]{6}$/)
+  .transform((color) => color.replace(/^#/, "").toUpperCase());
+const paletteSchema = z.object({
+  lightBackground: hexColor,
+  darkBackground: hexColor,
+  accent: hexColor,
+}).refine(({ lightBackground, darkBackground }) =>
+  luminance(lightBackground) >= 0.8 && luminance(darkBackground) <= 0.12,
+).catch(defaultPalette);
+
+export const presentationSchema = z.object({
+  title: slideText(60),
+  slides: z.array(slide),
+  palette: paletteSchema,
+});
+
+type Presentation = z.infer<typeof presentationSchema>;
+type SlideColors = { background: string; text: string; accent: string };
+
+export function getSlideColors({ slides, palette }: Presentation): SlideColors[] {
+  const { lightBackground, darkBackground, accent } = palette;
+  return slides.map((page, index) => {
+    const isCover = index === 0 && page.layout === "cover";
+    const isClosing = index === slides.length - 1 && page.layout === "summary" &&
+      page.closing && page.points.length === 1 && page.points[0].length <= 50;
+    const useDarkBackground = slides.length > 1 && (isCover || isClosing);
+    return {
+      background: useDarkBackground ? darkBackground : lightBackground,
+      text: useDarkBackground ? lightBackground : darkBackground,
+      accent,
+    };
+  });
+}
 
 const imageBoxes = {
   cover: { x: 6.66, y: 0.6, w: 5.82, h: 6.3 },
@@ -47,34 +86,28 @@ const imageBoxes = {
   summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
 } as const;
 
-async function fallbackImage(theme: (typeof themes)[keyof typeof themes], width: number, height: number, index: number) {
+async function fallbackImage(width: number, height: number, index: number) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 1000 1000" preserveAspectRatio="none">
-    <rect width="1000" height="1000" fill="#${theme.cover}"/>
-    <circle cx="${260 + (index % 4) * 135}" cy="425" r="158" fill="#${theme.light}" opacity=".84"/>
-    <path d="M0 690 Q250 320 540 645 T1000 584 V1000 H0 Z" fill="#${theme.accent}"/>
-    <path d="M0 825 Q300 585 670 804 T1000 758 V1000 H0 Z" fill="#${theme.light}" opacity=".33"/>
+    <rect width="1000" height="1000" fill="#F4F4F5"/>
+    <circle cx="${260 + (index % 4) * 135}" cy="425" r="158" fill="#D4D4D8"/>
+    <path d="M0 690 Q250 320 540 645 T1000 584 V1000 H0 Z" fill="#A1A1AA"/>
+    <path d="M0 825 Q300 585 670 804 T1000 758 V1000 H0 Z" fill="#71717A"/>
   </svg>`;
   return sharp(Buffer.from(svg)).jpeg({ quality: 86 }).toBuffer();
 }
 
 export async function preparePresentationImages(
-  presentation: z.infer<typeof presentationSchema>,
-  style: z.infer<typeof presentationStyles>,
+  { slides }: Pick<Presentation, "slides">,
   signal?: AbortSignal,
 ) {
-  const images: ({ bytes: Buffer; fallback: boolean } | undefined)[] = new Array(presentation.slides.length);
+  const images: ({ bytes: Buffer; fallback: boolean } | undefined)[] = new Array(slides.length);
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
-  const visualStyle = {
-    professional: "editorial illustration, refined cool palette",
-    warm: "editorial illustration, soft warm palette",
-    minimal: "minimal editorial illustration, restrained neutral palette",
-  }[style];
   let nextIndex = 0;
   async function worker() {
-    while (nextIndex < presentation.slides.length) {
+    while (nextIndex < slides.length) {
       signal?.throwIfAborted();
       const index = nextIndex++;
-      const page = presentation.slides[index];
+      const page = slides[index];
       if (!page.imageBrief) continue;
 
       const box = imageBoxes[page.layout];
@@ -84,7 +117,7 @@ export async function preparePresentationImages(
         try {
           const aspectRatio = page.layout === "two-columns" ? "16:9" : "1:1";
           const composition = page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
-          const prompt = `${page.imageBrief}. ${visualStyle}. No text, captions, or presentation layout. ${composition}`;
+          const prompt = `${page.imageBrief}. No text, captions, or presentation layout. ${composition}`;
           const image = await generateImageAsset(prompt, aspectRatio, signal);
           const bytes = await sharp(image).resize(width, height, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
           images[index] = { bytes, fallback: false };
@@ -94,27 +127,28 @@ export async function preparePresentationImages(
           console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
         }
       }
-      images[index] = { bytes: await fallbackImage(themes[style], width, height, index), fallback: true };
+      images[index] = { bytes: await fallbackImage(width, height, index), fallback: true };
     }
   }
-  await Promise.all(Array.from({ length: Math.min(3, presentation.slides.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
   signal?.throwIfAborted();
   return images;
 }
 
 export async function renderPresentation(
-  presentation: z.infer<typeof presentationSchema>,
-  style: z.infer<typeof presentationStyles>,
+  presentation: Presentation,
+  slideColors: SlideColors[],
   images: Awaited<ReturnType<typeof preparePresentationImages>>,
 ) {
   const pptx = new pptxgen();
   pptx.layout = "LAYOUT_WIDE";
   pptx.title = presentation.title;
-  const theme = themes[style];
   const textOptions = { fontFace: "Microsoft YaHei", margin: 0, valign: "middle", fit: "shrink" } as const;
 
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
+    const colors = slideColors[index];
+    slide.background = { color: colors.background };
     const image = images[index];
     if (image) {
       slide.addImage({
@@ -124,36 +158,35 @@ export async function renderPresentation(
       });
     }
     if (page.layout === "cover") {
-      slide.background = { color: theme.cover };
       const width = image ? 5.4 : 11.6;
       slide.addText(page.title, {
         ...textOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
-        h: 2.55, fontSize: 40, bold: true, color: theme.light,
+        h: 2.55, fontSize: 40, bold: true, color: colors.text,
       });
       if (page.subtitle) {
         slide.addText(page.subtitle, {
-          ...textOptions, x: 0.85, y: 4.23, w: width, h: 1.45, fontSize: 20, color: theme.light,
+          ...textOptions, x: 0.85, y: 4.23, w: width, h: 1.45, fontSize: 20, color: colors.text,
         });
       }
       continue;
     }
 
-    slide.background = { color: page.layout === "summary" ? theme.summary : theme.paper };
     slide.addText(page.title, {
-      ...textOptions, x: 0.85, y: 0.5, w: 11.6, h: 1.15, fontSize: 32, bold: true, color: theme.ink,
+      ...textOptions, x: 0.85, y: 0.5, w: 11.6, h: 1.15, fontSize: 32, bold: true, color: colors.text,
     });
 
     if (page.layout === "two-columns") {
+      const headingColor = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
       const headingY = image ? 4.11 : 1.94;
       const pointSpacing = image ? 0.76 : 1.24;
       for (const [column, x] of [[page.left, 0.85], [page.right, 7.0]] as const) {
         slide.addText(column.heading, {
-          ...textOptions, x, y: headingY, w: 5.4, h: 0.55, fontSize: 20, bold: true, color: theme.accent,
+          ...textOptions, x, y: headingY, w: 5.4, h: 0.55, fontSize: 20, bold: true, color: headingColor,
         });
         column.points.forEach((point, index) => {
           slide.addText(point, {
             ...textOptions, x, y: headingY + 0.62 + pointSpacing * index, w: 5.4, h: pointSpacing - 0.02,
-            fontSize: 17, color: theme.ink, bullet: { indent: 17 },
+            fontSize: 17, color: colors.text, bullet: { indent: 17 },
           });
         });
       }
@@ -163,7 +196,7 @@ export async function renderPresentation(
     page.points.forEach((point, index) => {
       slide.addText(point, {
         ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: image ? 6.2 : 11.6, h: 1.17,
-        fontSize: 20, color: theme.ink, bullet: { indent: 19 },
+        fontSize: 20, color: colors.text, bullet: { indent: 19 },
       });
     });
   }

@@ -128,9 +128,10 @@ function Chat() {
                     </p>
                   );
                 }
-                if (part.type === "tool-generatePresentation" || part.type === "tool-updateTextElement" || part.type === "tool-editPresentation") {
+                if (part.type === "tool-generatePresentation" || part.type === "tool-updateTextElement" ||
+                    part.type === "tool-editPresentation" || part.type === "tool-replaceImageElement") {
                   const isEdit = part.type !== "tool-generatePresentation";
-                  const action = isEdit ? "修改" : "生成";
+                  const action = part.type === "tool-replaceImageElement" ? "替换 PPT 配图" : isEdit ? "修改 PPT" : "生成 PPT";
                   if (part.state === "output-available" && "id" in part.output) {
                     const { id, title, slideCount, fallbackImageCount } = part.output;
                     return (
@@ -147,6 +148,9 @@ function Chat() {
                             {fallbackImageCount} 页使用了备用配图
                           </p>
                         )}
+                        {part.type === "tool-replaceImageElement" && part.output.qualityWarning && (
+                          <p className="basis-full text-xs text-muted-foreground">{part.output.qualityWarning}</p>
+                        )}
                       </div>
                     );
                   }
@@ -157,7 +161,7 @@ function Chat() {
                       <FileText aria-hidden="true" className="size-3.5" />
                       {part.state === "output-available" && "error" in part.output
                         ? part.output.error
-                        : finished ? `PPT ${action}失败，请稍后重试。` : busy ? `正在${action} PPT…` : `PPT ${action}已中断。`}
+                        : finished ? `${action}失败，请稍后重试。` : busy ? `正在${action}…` : `${action}已中断。`}
                     </p>
                   );
                 }

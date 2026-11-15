@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import pptxgen from "pptxgenjs";
-import sharp from "sharp";
+import sharp, { type ResizeOptions, type Sharp } from "sharp";
 import { z } from "zod";
 import { generateImageAsset } from "./images";
 
@@ -20,7 +20,8 @@ const title = slideText(50);
 const points = slidePoints(4, 90);
 // 双栏页中的一栏，包含栏标题 heading 和该栏的 points。栏标题最多 26 个字符，每条要点最多 60 个字符，校验后保留前 3 条。
 const column = z.object({ heading: slideText(26), points: slidePoints(3, 60) });
-const imageBrief = slideText(280).nullish();
+export const imageDescriptionSchema = slideText(280);
+const imageBrief = imageDescriptionSchema.nullish();
 export const slideTextFields = {
   title,
   subtitle: slideText(90),
@@ -114,6 +115,30 @@ const imageBoxes = {
 export const imageBoxSchema = z.object({ x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive() });
 export type PresentationImage = { bytes: Uint8Array<ArrayBuffer>; box: z.infer<typeof imageBoxSchema>; fallback: boolean };
 
+export function imagePixelSize({ w, h }: PresentationImage["box"]) {
+  return { width: Math.round(w * 135), height: Math.round(h * 135) };
+}
+
+export async function fitPresentationImage(
+  image: Sharp,
+  box: PresentationImage["box"],
+  options: Pick<ResizeOptions, "fit" | "position" | "background">,
+) {
+  const { width, height } = imagePixelSize(box);
+  return new Uint8Array(await image.resize({ width, height, ...options }).jpeg({ quality: 87 }).toBuffer());
+}
+
+export function imageNeedsUpscaling(
+  box: PresentationImage["box"],
+  dimensions: { width: number; height: number },
+  fit: "cover" | "contain",
+) {
+  const { width, height } = imagePixelSize(box);
+  const scales = [width / dimensions.width, height / dimensions.height];
+  const scale = fit === "contain" ? Math.min(...scales) : Math.max(...scales);
+  return scale > 1.5;
+}
+
 async function fallbackImage(width: number, height: number, index: number) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 1000 1000" preserveAspectRatio="none">
     <rect width="1000" height="1000" fill="#F4F4F5"/>
@@ -162,19 +187,19 @@ export async function preparePresentationImages(
             // Allow minor provider rounding (e.g. 1696 × 960 for a 16:9 request).
             if (Math.abs(width / height / slideAspect - 1) <= 0.02) box = fullSlideImageBox;
           }
-          const bytes = await source.resize(Math.round(box.w * 135), Math.round(box.h * 135), {
+          const bytes = await fitPresentationImage(source, box, {
             fit: "cover",
             position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
-          }).jpeg({ quality: 87 }).toBuffer();
-          images.set(page.slideId, { bytes: new Uint8Array(bytes), box, fallback: false });
+          });
+          images.set(page.slideId, { bytes, box, fallback: false });
           continue;
         } catch (error) {
           signal?.throwIfAborted();
           console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
         }
       }
-      const { w, h } = sideOrContentBox;
-      const bytes = await fallbackImage(Math.round(w * 135), Math.round(h * 135), index);
+      const { width, height } = imagePixelSize(sideOrContentBox);
+      const bytes = await fallbackImage(width, height, index);
       images.set(page.slideId, { bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true });
     }
   }

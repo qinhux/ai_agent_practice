@@ -4,6 +4,7 @@ import { z } from "zod";
 
 export const imageAspectRatios = z.enum(["1:1", "16:9", "9:16"]);
 type ImageAspectRatio = z.infer<typeof imageAspectRatios>;
+type ImageDimensions = { width: number; height: number };
 
 const imageSizes: Record<ImageAspectRatio, string> = {
   "1:1": "1280*1280",
@@ -20,9 +21,36 @@ const imageResponse = z.object({
 const maxImageBytes = 12 * 1024 * 1024;
 let nextRequestAt = 0;
 
+function getImageModel() {
+  return process.env.DASHSCOPE_IMAGE_MODEL?.trim() || "wan2.6-t2i";
+}
+
+export function getCustomImageGenerationSize({ width, height }: ImageDimensions): ImageDimensions | undefined {
+  if (getImageModel() !== "wan2.6-t2i") return;
+
+  // Wan 2.6 accepts custom dimensions within these pixel-area and aspect-ratio limits.
+  const minPixels = 1280 ** 2;
+  const maxPixels = 1440 ** 2;
+  const maxAspect = 4;
+  const pixels = width * height;
+  const landscape = width >= height;
+  const aspect = landscape ? width / height : height / width;
+  if (pixels >= minPixels && pixels <= maxPixels && aspect <= maxAspect) return { width, height };
+
+  const targetPixels = Math.min(maxPixels, Math.max(minPixels, pixels));
+  const targetAspect = Math.min(maxAspect, aspect);
+  const shortEdge = Math.round(Math.sqrt(targetPixels / targetAspect));
+  const longEdge = Math.min(
+    Math.floor(maxPixels / shortEdge),
+    maxAspect * shortEdge,
+    Math.max(Math.ceil(minPixels / shortEdge), Math.round(shortEdge * targetAspect)),
+  );
+  return landscape ? { width: longEdge, height: shortEdge } : { width: shortEdge, height: longEdge };
+}
+
 export async function generateImageAsset(
   prompt: string,
-  aspectRatio: ImageAspectRatio,
+  size: ImageAspectRatio | ImageDimensions,
   abortSignal?: AbortSignal,
 ): Promise<Buffer> {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
@@ -45,9 +73,9 @@ export async function generateImageAsset(
     redirect: "error",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: process.env.DASHSCOPE_IMAGE_MODEL?.trim() || "wan2.6-t2i",
+      model: getImageModel(),
       input: { messages: [{ role: "user", content: [{ text: prompt }] }] },
-      parameters: { n: 1, size: imageSizes[aspectRatio], prompt_extend: false },
+      parameters: { n: 1, size: typeof size === "string" ? imageSizes[size] : `${size.width}*${size.height}`, prompt_extend: false },
     }),
     signal,
   });
@@ -92,8 +120,9 @@ export async function generateImageAsset(
   if (format !== "png" && format !== "jpeg" && format !== "webp") {
     throw new Error("Unsupported DashScope image format.");
   }
-  const normalized = await image.rotate().resize(1696, 1696, { fit: "inside", withoutEnlargement: true })
-    .flatten({ background: "#ffffff" }).jpeg({ quality: 90 }).toBuffer();
+  image.rotate();
+  if (typeof size === "string") image.resize(1696, 1696, { fit: "inside", withoutEnlargement: true });
+  const normalized = await image.flatten({ background: "#ffffff" }).jpeg({ quality: 90 }).toBuffer();
   signal.throwIfAborted();
   return normalized;
 }

@@ -1,8 +1,12 @@
 import { convertToModelMessages, safeValidateUIMessages } from "ai";
+import { z } from "zod";
 import { createAgent, type AgentMessage } from "@/server/agent";
 import { getAuth } from "@/server/auth";
 
 export const runtime = "nodejs";
+
+const messageWithParts = z.looseObject({ parts: z.array(z.unknown()) });
+const legacyTextToolPart = z.looseObject({ type: z.literal("tool-editPresentation") });
 
 export async function POST(request: Request) {
   const auth = getAuth();
@@ -37,7 +41,15 @@ export async function POST(request: Request) {
   }
 
   const agent = createAgent(apiKey, session.user.id);
-  const result = await safeValidateUIMessages<AgentMessage>({ messages, tools: agent.tools });
+  const normalized = messages.map((message) => {
+    const parsed = messageWithParts.safeParse(message);
+    if (!parsed.success) return message;
+    return { ...parsed.data, parts: parsed.data.parts.map((part) => {
+      const legacy = legacyTextToolPart.safeParse(part);
+      return legacy.success ? { ...legacy.data, type: "tool-updateTextElement" } : part;
+    }) };
+  });
+  const result = await safeValidateUIMessages<AgentMessage>({ messages: normalized, tools: agent.tools });
   const lastMessage = result.success ? result.data.at(-1) : undefined;
   if (!result.success || lastMessage?.role !== "user" || !lastMessage.parts.some(
     (part) => part.type === "text" && part.text.trim(),

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
 import { cn } from "@/lib/utils";
-import type { AgentMessage } from "@/server/agent";
+import type { ChatMessage } from "@/server/agent";
 import { useChatStore } from "@/stores/chat-store";
 
 const examplePrompt = "现在上海几点？请查询当前时间。";
@@ -18,7 +18,7 @@ const imageExample = "生成一张方形插画，画一只在窗边晒太阳的�
 
 function Chat() {
   const { messages, sendMessage, status, stop, error, clearError, setMessages } =
-    useChat<AgentMessage>();
+    useChat<ChatMessage>();
   const draft = useChatStore((state) => state.draft);
   const setDraft = useChatStore((state) => state.setDraft);
   const endRef = useRef<HTMLDivElement>(null);
@@ -128,7 +128,9 @@ function Chat() {
                     </p>
                   );
                 }
-                if (part.type === "tool-generatePresentation") {
+                if (part.type === "tool-generatePresentation" || part.type === "tool-updateTextElement" || part.type === "tool-editPresentation") {
+                  const isEdit = part.type !== "tool-generatePresentation";
+                  const action = isEdit ? "修改" : "生成";
                   if (part.state === "output-available" && "id" in part.output) {
                     const { id, title, slideCount, fallbackImageCount } = part.output;
                     return (
@@ -137,7 +139,7 @@ function Chat() {
                         <span className="wrap-anywhere">{title} · {slideCount} 页</span>
                         <Button asChild variant="outline" className="h-8 px-3 text-xs">
                           <a href={`/api/presentations/${encodeURIComponent(id)}`} download>
-                            <Download aria-hidden="true" /> 下载 PPT
+                            <Download aria-hidden="true" /> {isEdit ? "下载修改版 PPT" : "下载 PPT"}
                           </a>
                         </Button>
                         {Boolean(fallbackImageCount) && (
@@ -153,7 +155,9 @@ function Chat() {
                   return (
                     <p key={index} role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
                       <FileText aria-hidden="true" className="size-3.5" />
-                      {finished ? "PPT 生成失败，请稍后重试。" : busy ? "正在生成 PPT…" : "PPT 生成已中断。"}
+                      {part.state === "output-available" && "error" in part.output
+                        ? part.output.error
+                        : finished ? `PPT ${action}失败，请稍后重试。` : busy ? `正在${action} PPT…` : `PPT ${action}已中断。`}
                     </p>
                   );
                 }

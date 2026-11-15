@@ -128,7 +128,8 @@ function Chat() {
                     </p>
                   );
                 }
-                if (part.type === "tool-generatePresentation" || part.type === "tool-updateTextElement" ||
+                if (part.type === "tool-generatePresentation" || part.type === "tool-updateSlideElements" ||
+                    part.type === "tool-updateTextElement" ||
                     part.type === "tool-editPresentation" || part.type === "tool-replaceImageElement") {
                   const isEdit = part.type !== "tool-generatePresentation";
                   const action = part.type === "tool-replaceImageElement" ? "替换 PPT 配图" : isEdit ? "修改 PPT" : "生成 PPT";
@@ -151,6 +152,9 @@ function Chat() {
                         {part.type === "tool-replaceImageElement" && part.output.qualityWarning && (
                           <p className="basis-full text-xs text-muted-foreground">{part.output.qualityWarning}</p>
                         )}
+                        {part.type === "tool-updateSlideElements" && part.output.qualityWarnings.map((warning) => (
+                          <p key={warning} className="basis-full text-xs text-muted-foreground">{warning}</p>
+                        ))}
                       </div>
                     );
                   }

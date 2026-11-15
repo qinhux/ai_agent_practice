@@ -69,7 +69,7 @@ async function writePresentation(
 
 export function createPresentationTool(model: LanguageModel, userId: string, providerOptions: ProviderOptions) {
   return tool({
-    description: `Create and deliver a new editable PowerPoint (.pptx) file. For text changes to an existing PPT, use updateTextElement. To replace an existing slide image, use replaceImageElement. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
+    description: `Create and deliver a new editable PowerPoint (.pptx) file. For edits to an existing PPT, use updateSlideElements. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
     inputSchema: z.object({
       topic: z.string().trim().min(1).max(240).describe("Presentation topic or working title"),
       audience: z.string().trim().min(1).max(160).optional(),

@@ -59,8 +59,22 @@ export const textStyleSchema = z.strictObject({
   fontFace: slideText(100).optional(),
   fontSize: z.number().min(1).max(400).optional(),
   color: hexColor.optional(),
+  bold: z.boolean().optional(),
+  italic: z.boolean().optional(),
+  align: z.enum(["left", "center", "right", "justify"]).optional(),
 });
-const textStylesSchema = z.record(z.string().regex(/^(title|subtitle|point[1-4]|(left|right)(Heading|Point[1-3]))$/), textStyleSchema);
+export const textElementKeySchema = z.enum([
+  "title", "subtitle", "point1", "point2", "point3", "point4",
+  "leftHeading", "leftPoint1", "leftPoint2", "leftPoint3",
+  "rightHeading", "rightPoint1", "rightPoint2", "rightPoint3",
+]);
+export type TextElementKey = z.infer<typeof textElementKeySchema>;
+export const elementBoxSchema = z.strictObject({
+  x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(),
+});
+export const imageFitSchema = z.enum(["cover", "contain"]);
+const imagePositionSchema = z.enum(["centre", "right"]);
+const imageLayoutSchema = z.object({ fullSlide: z.boolean(), gradient: z.boolean() });
 const paletteSchema = z.object({
   lightBackground: hexColor,
   darkBackground: hexColor,
@@ -77,11 +91,18 @@ export const presentationSchema = z.object({
 
 type Presentation = z.infer<typeof presentationSchema>;
 export const presentationSourceSchema = presentationSchema.extend({
-  slides: z.array(slide.and(z.object({ slideId: z.uuid(), textStyles: textStylesSchema.optional() }))).min(1).refine(
+  slides: z.array(slide.and(z.object({
+    slideId: z.uuid(),
+    textStyles: z.partialRecord(textElementKeySchema, textStyleSchema).optional(),
+    textBoxes: z.partialRecord(textElementKeySchema, elementBoxSchema).optional(),
+    imageLayout: imageLayoutSchema.optional(),
+    imageFit: z.object({ fit: imageFitSchema, position: imagePositionSchema }).optional(),
+  }))).min(1).refine(
     (slides) => new Set(slides.map((page) => page.slideId)).size === slides.length,
   ),
 });
 export type PresentationSource = z.infer<typeof presentationSourceSchema>;
+export type PresentationSlide = PresentationSource["slides"][number];
 type SlideColors = { background: string; text: string; accent: string };
 
 export function getSlideColors({ slides, palette }: Presentation): SlideColors[] {
@@ -100,7 +121,8 @@ export function getSlideColors({ slides, palette }: Presentation): SlideColors[]
 }
 
 // LAYOUT_WIDE measures 13⅓ × 7½ inches.
-const fullSlideImageBox = { x: 0, y: 0, w: 40 / 3, h: 7.5 };
+export const slideSize = { w: 40 / 3, h: 7.5 };
+const fullSlideImageBox = { x: 0, y: 0, ...slideSize };
 const firstSlideSideImageBox = { x: 7.5, y: 0, w: fullSlideImageBox.w - 7.5, h: fullSlideImageBox.h };
 const firstSlideTextWidth = 6.2;
 const pageNumberBox = { x: fullSlideImageBox.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
@@ -112,8 +134,15 @@ const imageBoxes = {
   summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
 } as const;
 
-export const imageBoxSchema = z.object({ x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive() });
-export type PresentationImage = { bytes: Uint8Array<ArrayBuffer>; box: z.infer<typeof imageBoxSchema>; fallback: boolean };
+export type ElementBox = z.infer<typeof elementBoxSchema>;
+export type PresentationImage = { bytes: Uint8Array<ArrayBuffer>; box: ElementBox; fallback: boolean };
+
+export function getSlideImageLayout(page: PresentationSlide, box?: ElementBox) {
+  return page.imageLayout ?? {
+    fullSlide: box?.w === slideSize.w && box.h === slideSize.h,
+    gradient: box?.y === 0 && box.h === slideSize.h,
+  };
+}
 
 export function imagePixelSize({ w, h }: PresentationImage["box"]) {
   return { width: Math.round(w * 135), height: Math.round(h * 135) };
@@ -208,6 +237,82 @@ export async function preparePresentationImages(
   return images;
 }
 
+type SlideTextElement = {
+  key: TextElementKey;
+  text: string;
+  box: ElementBox;
+  style: z.infer<typeof textStyleSchema>;
+  bullet?: { indent: number };
+};
+
+export function getSlideTextElements(
+  page: PresentationSlide,
+  colors: SlideColors,
+  index: number,
+  imageBox?: ElementBox,
+): SlideTextElement[] {
+  const elements: SlideTextElement[] = [];
+  const hasFirstSlideImage = index === 0 && Boolean(imageBox);
+  function add(
+    key: TextElementKey,
+    text: string,
+    box: ElementBox,
+    style: SlideTextElement["style"],
+    bullet?: SlideTextElement["bullet"],
+  ) {
+    elements.push({
+      key, text, box: page.textBoxes?.[key] ?? box,
+      style: { fontFace: "Arial", color: colors.text, ...style, ...page.textStyles?.[key] },
+      bullet,
+    });
+  }
+
+  if (page.layout === "cover") {
+    const width = hasFirstSlideImage ? firstSlideTextWidth : imageBox ? 5.4 : 11.6;
+    add("title", page.title,
+      { x: 0.85, y: imageBox || page.subtitle ? 1.52 : 2.48, w: width, h: 2.55 },
+      { fontFace: "Georgia", bold: true, fontSize: 40 });
+    if (page.subtitle) {
+      add("subtitle", page.subtitle,
+        { x: 0.85, y: 4.23, w: width, h: 1.45 }, { fontSize: 20 });
+    }
+    return elements;
+  }
+
+  add("title", page.title,
+    { x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6, h: 1.15 },
+    { fontFace: "Georgia", bold: true, fontSize: 32 });
+  if (page.layout === "two-columns") {
+    const { fullSlide } = getSlideImageLayout(page, imageBox);
+    const headingColor = !fullSlide && contrastRatio(colors.accent, colors.background) >= 4.5
+      ? colors.accent : colors.text;
+    const hasImageAboveColumns = imageBox && !hasFirstSlideImage;
+    const headingY = hasImageAboveColumns ? 4.11 : 1.94;
+    const pointSpacing = hasImageAboveColumns ? 0.76 : 1.24;
+    const columnGap = 0.4;
+    const columnWidth = hasFirstSlideImage ? (firstSlideTextWidth - columnGap) / 2 : 5.4;
+    const rightColumnX = hasFirstSlideImage ? 0.85 + columnWidth + columnGap : 7.0;
+    for (const [side, x] of [["left", 0.85], ["right", rightColumnX]] as const) {
+      const column = page[side];
+      add(`${side}Heading`, column.heading,
+        { x, y: headingY, w: columnWidth, h: 0.55 },
+        { fontSize: 20, bold: true, color: headingColor });
+      column.points.forEach((point, index) => {
+        add(`${side}Point${index + 1}` as TextElementKey, point,
+          { x, y: headingY + 0.62 + pointSpacing * index, w: columnWidth, h: pointSpacing - 0.02 },
+          { fontSize: 17 }, { indent: 17 });
+      });
+    }
+  } else {
+    page.points.forEach((point, index) => {
+      add(`point${index + 1}` as TextElementKey, point,
+        { x: 0.85, y: 1.94 + 1.24 * index, w: imageBox ? firstSlideTextWidth : 11.6, h: 1.17 },
+        { fontSize: 20 }, { indent: 19 });
+    });
+  }
+  return elements;
+}
+
 export async function renderPresentation(
   presentation: PresentationSource,
   slideColors: SlideColors[],
@@ -217,18 +322,15 @@ export async function renderPresentation(
   pptx.layout = "LAYOUT_WIDE";
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
-  const titleOptions = { ...textOptions, fontFace: "Georgia", bold: true } as const;
   const slidesWithGradient = new Set<string>();
   const customFonts = new Map<string, string>();
 
-  function textStyle(style: z.infer<typeof textStyleSchema> | undefined) {
-    if (!style?.fontFace) return style;
+  function customFontFace(fontFace: string) {
     // PptxGenJS inserts font names into XML attributes without escaping them.
-    const { fontFace, ...options } = style;
     const token = `PptxCustomFont${customFonts.size}`;
     customFonts.set(token, fontFace.replaceAll("&", "&amp;").replaceAll('"', "&quot;")
       .replaceAll("<", "&lt;").replaceAll(">", "&gt;"));
-    return { ...options, fontFace: token };
+    return token;
   }
 
   for (const [index, page] of presentation.slides.entries()) {
@@ -236,15 +338,20 @@ export async function renderPresentation(
     const colors = slideColors[index];
     slide.background = { color: colors.background };
     const image = images.get(page.slideId);
-    const hasFirstSlideImage = index === 0 && Boolean(image);
-    const hasFullSlideImage = image?.box.w === fullSlideImageBox.w && image.box.h === fullSlideImageBox.h;
     if (image) {
+      const bytes = page.imageFit
+        ? await fitPresentationImage(sharp(image.bytes, { limitInputPixels: 16_000_000 }), image.box, {
+          ...page.imageFit,
+          background: `#${presentation.palette.lightBackground}`,
+        })
+        : image.bytes;
       slide.addImage({
-        data: `image/jpeg;base64,${Buffer.from(image.bytes.buffer, image.bytes.byteOffset, image.bytes.byteLength).toString("base64")}`,
+        data: `image/jpeg;base64,${Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")}`,
+        objectName: "image",
         ...image.box,
         altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
       });
-      if (image.box.y === 0 && image.box.h === fullSlideImageBox.h) {
+      if (getSlideImageLayout(page, image.box).gradient) {
         slide.addShape(pptx.ShapeType.rect, {
           ...image.box,
           objectName: "渐变遮罩",
@@ -262,58 +369,14 @@ export async function renderPresentation(
       fill: imageOverlapsPageNumber ? { color: presentation.palette.darkBackground } : undefined,
     });
 
-    if (page.layout === "cover") {
-      const width = hasFirstSlideImage ? firstSlideTextWidth : image ? 5.4 : 11.6;
-      slide.addText(page.title, {
-        ...titleOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
-        h: 2.55, fontSize: 40, color: colors.text, ...textStyle(page.textStyles?.title),
+    for (const { key, text, box, style, bullet } of getSlideTextElements(page, colors, index, image?.box)) {
+      const explicitFont = page.textStyles?.[key]?.fontFace;
+      slide.addText(text, {
+        ...textOptions, ...box, ...style,
+        fontFace: explicitFont ? customFontFace(explicitFont) : style.fontFace,
+        objectName: key, bullet,
       });
-      if (page.subtitle) {
-        slide.addText(page.subtitle, {
-          ...textOptions, x: 0.85, y: 4.23, w: width, h: 1.45, fontSize: 20, color: colors.text,
-          ...textStyle(page.textStyles?.subtitle),
-        });
-      }
-      continue;
     }
-
-    slide.addText(page.title, {
-      ...titleOptions, x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6,
-      h: 1.15, fontSize: 32, color: colors.text, ...textStyle(page.textStyles?.title),
-    });
-
-    if (page.layout === "two-columns") {
-      const headingColor = !hasFullSlideImage && contrastRatio(colors.accent, colors.background) >= 4.5
-        ? colors.accent : colors.text;
-      const hasImageAboveColumns = image && !hasFirstSlideImage;
-      const headingY = hasImageAboveColumns ? 4.11 : 1.94;
-      const pointSpacing = hasImageAboveColumns ? 0.76 : 1.24;
-      const columnGap = 0.4;
-      const columnWidth = hasFirstSlideImage ? (firstSlideTextWidth - columnGap) / 2 : 5.4;
-      const rightColumnX = hasFirstSlideImage ? 0.85 + columnWidth + columnGap : 7.0;
-      for (const [side, x] of [["left", 0.85], ["right", rightColumnX]] as const) {
-        const column = page[side];
-        slide.addText(column.heading, {
-          ...textOptions, x, y: headingY, w: columnWidth, h: 0.55, fontSize: 20, bold: true, color: headingColor,
-          ...textStyle(page.textStyles?.[`${side}Heading`]),
-        });
-        column.points.forEach((point, index) => {
-          slide.addText(point, {
-            ...textOptions, x, y: headingY + 0.62 + pointSpacing * index, w: columnWidth, h: pointSpacing - 0.02,
-            fontSize: 17, color: colors.text, bullet: { indent: 17 },
-            ...textStyle(page.textStyles?.[`${side}Point${index + 1}`]),
-          });
-        });
-      }
-      continue;
-    }
-
-    page.points.forEach((point, index) => {
-      slide.addText(point, {
-        ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: image ? firstSlideTextWidth : 11.6, h: 1.17,
-        fontSize: 20, color: colors.text, bullet: { indent: 19 }, ...textStyle(page.textStyles?.[`point${index + 1}`]),
-      });
-    });
   }
 
   const bytes = await pptx.write({ outputType: "nodebuffer" });

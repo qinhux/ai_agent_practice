@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { generateText, NoObjectGeneratedError, Output, tool, type LanguageModel } from "ai";
 import { z } from "zod";
 import { preparePresentationImages, presentationSchema } from "./presentations";
-import { savePresentation } from "./save-presentation";
+import type { PresentationDrafts } from "./presentation-drafts";
 
 type ProviderOptions = Parameters<typeof generateText>[0]["providerOptions"];
 
@@ -67,9 +67,9 @@ async function writePresentation(
   throw new Error("Invalid presentation content.");
 }
 
-export function createPresentationTool(model: LanguageModel, userId: string, providerOptions: ProviderOptions) {
+export function createPresentationTool(model: LanguageModel, drafts: PresentationDrafts, providerOptions: ProviderOptions) {
   return tool({
-    description: `Create and deliver a new editable PowerPoint (.pptx) file. For existing PPTs, use updateSlideElements to edit content and addOrRemoveSlideElements to add or delete elements. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
+    description: `Create a new editable PowerPoint draft for this turn. For existing PPTs, use updateSlideElements or addOrRemoveSlideElements. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
     inputSchema: z.object({
       topic: z.string().trim().min(1).max(240).describe("Presentation topic or working title"),
       audience: z.string().trim().min(1).max(160).optional(),
@@ -92,7 +92,8 @@ export function createPresentationTool(model: LanguageModel, userId: string, pro
           slides: content.slides.map((slide) => ({ ...slide, slideId: randomUUID() })),
         };
         const images = await preparePresentationImages(source, abortSignal);
-        return await savePresentation(userId, source, images, abortSignal);
+        abortSignal?.throwIfAborted();
+        return { presentationId: drafts.create(source, images), title: source.title, slideCount: source.slides.length };
       } catch (error) {
         abortSignal?.throwIfAborted();
         console.error("Presentation generation failed:", error instanceof Error ? error.name : "UnknownError");

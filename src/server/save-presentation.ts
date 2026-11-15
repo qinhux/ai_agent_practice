@@ -1,4 +1,6 @@
 import { getPrisma } from "./db";
+import type { Prisma } from "@/generated/prisma/client";
+import type { FileDeliveryData } from "@/lib/file-delivery";
 import {
   elementBoxSchema,
   getSlideColors,
@@ -30,39 +32,51 @@ export async function loadPresentationForEdit(userId: string, presentationId: st
   return { source: result.source, images };
 }
 
-export async function savePresentation(
-  userId: string,
-  // 可编辑的 PPT 源数据，包括标题、配色、每页的版式、文字和文字样式。
-  source: PresentationSource,
-  // 按元素 ID 索引的图片集合。
-  images: ReadonlyMap<string, PresentationImage>,
-  // 请求的取消信号。函数在渲染完成后、写入数据库前检查它。
-  abortSignal?: AbortSignal,
-  // 本次修改所基于的 PPT 版本 ID。首次生成时省略，修改已有 PPT 时传入。
-  parentId?: string,
-) {
-  const bytes = await renderPresentation(source, getSlideColors(source), images);
-  abortSignal?.throwIfAborted();
-  const presentation = await getPrisma().presentation.create({
-    data: {
-      userId,
-      parentId,
-      title: source.title,
-      bytes,
-      source,
-      images: { create: Array.from(images, ([elementId, image]) => ({ elementId, ...image })) },
-    },
-    select: { id: true, title: true },
-  });
+export type PresentationDraft = {
+  source: PresentationSource;
+  images: ReadonlyMap<string, PresentationImage>;
+  parentId?: string;
+  warnings: readonly string[];
+};
 
-  return {
-    // id：本次保存的新记录 ID，聊天界面用它构造下载链接
-    // 保存后的 PPT 标题
-    ...presentation,
-    // PPT 的总页数
-    slideCount: source.slides.length,
-    // 使用备用图片的数量
-    fallbackImageCount: new Set(Array.from(images.values()).filter((image) => image.fallback)
-      .map((image) => image.slideId)).size,
+export async function preparePresentationDrafts(
+  userId: string,
+  drafts: Iterable<PresentationDraft>,
+  abortSignal: AbortSignal,
+) {
+  const prepared: {
+    data: Prisma.PresentationUncheckedCreateInput;
+    slideCount: number;
+    fallbackImageCount: number;
+    warnings: readonly string[];
+  }[] = [];
+  for (const { source, images, parentId, warnings } of drafts) {
+    abortSignal.throwIfAborted();
+    const bytes = await renderPresentation(source, getSlideColors(source), images);
+    prepared.push({
+      data: {
+        userId, parentId, title: source.title, bytes, source,
+        images: { create: Array.from(images, ([elementId, image]) => ({ elementId, ...image })) },
+      },
+      slideCount: source.slides.length,
+      fallbackImageCount: new Set([...images.values()].filter((image) => image.fallback).map((image) => image.slideId)).size,
+      warnings,
+    });
+  }
+  return async (transaction: Prisma.TransactionClient) => {
+    const files: FileDeliveryData["files"] = [];
+    for (const { data, slideCount, fallbackImageCount, warnings } of prepared) {
+      abortSignal.throwIfAborted();
+      const { id, title } = await transaction.presentation.create({ data, select: { id: true, title: true } });
+      files.push({
+        id,
+        kind: "presentation",
+        name: `${title}.pptx`,
+        downloadUrl: `/api/presentations/${encodeURIComponent(id)}`,
+        details: `${slideCount} 页`,
+        warnings: fallbackImageCount ? [`${fallbackImageCount} 页使用了备用配图`, ...warnings] : [...warnings],
+      });
+    }
+    return files;
   };
 }

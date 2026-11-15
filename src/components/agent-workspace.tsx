@@ -8,6 +8,7 @@ import { AuthForm } from "@/components/auth-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
+import { legacyPresentationDownloadSchema, type FileDeliveryData } from "@/lib/file-delivery";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/server/agent";
 import { useChatStore } from "@/stores/chat-store";
@@ -15,6 +16,23 @@ import { useChatStore } from "@/stores/chat-store";
 const examplePrompt = "现在上海几点？请查询当前时间。";
 const presentationExample = "做一份 8 页的武汉城市介绍 PPT，面向第一次来武汉的游客。";
 const imageExample = "生成一张方形插画，画一只在窗边晒太阳的橘猫。";
+
+function FileDownload({ file }: { file: FileDeliveryData["files"][number] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg bg-secondary px-3 py-2">
+      <FileText aria-hidden="true" className="size-4 shrink-0" />
+      <span className="wrap-anywhere">{file.name}{file.details ? ` · ${file.details}` : ""}</span>
+      <Button asChild variant="outline" className="h-8 px-3 text-xs">
+        <a href={file.downloadUrl} download>
+          <Download aria-hidden="true" /> 下载
+        </a>
+      </Button>
+      {file.warnings?.map((warning) => (
+        <p key={warning} className="basis-full text-xs text-muted-foreground">{warning}</p>
+      ))}
+    </div>
+  );
+}
 
 function Chat() {
   const { messages, sendMessage, status, stop, error, clearError, setMessages } =
@@ -85,6 +103,16 @@ function Chat() {
                 if (part.type === "text") {
                   return <p key={index} className="whitespace-pre-wrap wrap-break-word">{part.text}</p>;
                 }
+                if (part.type === "data-files") {
+                  return (
+                    <div key={index} className="space-y-2">
+                      {part.data.map((file) => <FileDownload key={`${file.kind}:${file.id}`} file={file} />)}
+                    </div>
+                  );
+                }
+                if (part.type === "data-file-error") {
+                  return <p key={index} role="status" className="text-sm text-destructive">{part.data}</p>;
+                }
                 if (part.type === "tool-getCurrentTime") {
                   return (
                     <p key={index} className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -134,30 +162,17 @@ function Chat() {
                     part.type === "tool-editPresentation" || part.type === "tool-replaceImageElement") {
                   const isEdit = part.type !== "tool-generatePresentation";
                   const action = part.type === "tool-replaceImageElement" ? "替换 PPT 配图" : isEdit ? "修改 PPT" : "生成 PPT";
-                  if (part.state === "output-available" && "id" in part.output) {
-                    const { id, title, slideCount, fallbackImageCount } = part.output;
-                    return (
-                      <div key={index} className="flex flex-wrap items-center gap-3 rounded-lg bg-secondary px-3 py-2">
-                        <FileText aria-hidden="true" className="size-4 shrink-0" />
-                        <span className="wrap-anywhere">{title} · {slideCount} 页</span>
-                        <Button asChild variant="outline" className="h-8 px-3 text-xs">
-                          <a href={`/api/presentations/${encodeURIComponent(id)}`} download>
-                            <Download aria-hidden="true" /> {isEdit ? "下载修改版 PPT" : "下载 PPT"}
-                          </a>
-                        </Button>
-                        {Boolean(fallbackImageCount) && (
-                          <p className="basis-full text-xs text-muted-foreground">
-                            {fallbackImageCount} 页使用了备用配图
-                          </p>
-                        )}
-                        {part.type === "tool-replaceImageElement" && part.output.qualityWarning && (
-                          <p className="basis-full text-xs text-muted-foreground">{part.output.qualityWarning}</p>
-                        )}
-                        {part.type === "tool-updateSlideElements" && part.output.qualityWarnings.map((warning) => (
-                          <p key={warning} className="basis-full text-xs text-muted-foreground">{warning}</p>
-                        ))}
-                      </div>
-                    );
+                  if (part.state === "output-available" && !("error" in part.output)) {
+                    const legacy = legacyPresentationDownloadSchema.safeParse(part.output);
+                    if (!legacy.success) return null;
+                    const { id, title, slideCount, fallbackImageCount, qualityWarnings, qualityWarning } = legacy.data;
+                    const warnings = [...(qualityWarnings ?? [])];
+                    if (qualityWarning) warnings.push(qualityWarning);
+                    if (fallbackImageCount) warnings.unshift(`${fallbackImageCount} 页使用了备用配图`);
+                    return <FileDownload key={index} file={{
+                      id, kind: "presentation", name: `${title}.pptx`,
+                      details: `${slideCount} 页`, downloadUrl: `/api/presentations/${encodeURIComponent(id)}`, warnings,
+                    }} />;
                   }
 
                   const finished = part.state === "output-error" || part.state === "output-available" || part.state === "output-denied";

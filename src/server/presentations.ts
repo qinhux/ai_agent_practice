@@ -21,6 +21,13 @@ const points = slidePoints(4, 90);
 // 双栏页中的一栏，包含栏标题 heading 和该栏的 points。栏标题最多 26 个字符，每条要点最多 60 个字符，校验后保留前 3 条。
 const column = z.object({ heading: slideText(26), points: slidePoints(3, 60) });
 const imageBrief = slideText(280).nullish();
+export const slideTextFields = {
+  title,
+  subtitle: slideText(90),
+  points: z.array(slideText(90)).min(1).max(4),
+  columnHeading: column.shape.heading,
+  columnPoints: z.array(slideText(60)).min(1).max(3),
+};
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
 const slide = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("cover"), title, subtitle: slideText(90).optional(), imageBrief }),
@@ -47,6 +54,12 @@ function contrastRatio(first: string, second: string) {
 const defaultPalette = { lightBackground: "F7F9FC", darkBackground: "142846", accent: "225AA5" };
 const hexColor = z.string().trim().regex(/^#?[0-9a-fA-F]{6}$/)
   .transform((color) => color.replace(/^#/, "").toUpperCase());
+export const textStyleSchema = z.strictObject({
+  fontFace: slideText(100).optional(),
+  fontSize: z.number().min(1).max(400).optional(),
+  color: hexColor.optional(),
+});
+const textStylesSchema = z.record(z.string().regex(/^(title|subtitle|point[1-4]|(left|right)(Heading|Point[1-3]))$/), textStyleSchema);
 const paletteSchema = z.object({
   lightBackground: hexColor,
   darkBackground: hexColor,
@@ -62,9 +75,12 @@ export const presentationSchema = z.object({
 });
 
 type Presentation = z.infer<typeof presentationSchema>;
-type PresentationSource = Omit<Presentation, "slides"> & {
-  slides: (Presentation["slides"][number] & { slideId: string })[];
-};
+export const presentationSourceSchema = presentationSchema.extend({
+  slides: z.array(slide.and(z.object({ slideId: z.uuid(), textStyles: textStylesSchema.optional() }))).min(1).refine(
+    (slides) => new Set(slides.map((page) => page.slideId)).size === slides.length,
+  ),
+});
+export type PresentationSource = z.infer<typeof presentationSourceSchema>;
 type SlideColors = { background: string; text: string; accent: string };
 
 export function getSlideColors({ slides, palette }: Presentation): SlideColors[] {
@@ -86,6 +102,7 @@ export function getSlideColors({ slides, palette }: Presentation): SlideColors[]
 const fullSlideImageBox = { x: 0, y: 0, w: 40 / 3, h: 7.5 };
 const firstSlideSideImageBox = { x: 7.5, y: 0, w: fullSlideImageBox.w - 7.5, h: fullSlideImageBox.h };
 const firstSlideTextWidth = 6.2;
+const pageNumberBox = { x: fullSlideImageBox.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
 
 const imageBoxes = {
   cover: { x: 6.66, y: 0.6, w: 5.82, h: 6.3 },
@@ -94,8 +111,8 @@ const imageBoxes = {
   summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
 } as const;
 
-type ImageBox = { x: number; y: number; w: number; h: number };
-type PresentationImage = { bytes: Buffer; box: ImageBox; fallback: boolean };
+export const imageBoxSchema = z.object({ x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive() });
+export type PresentationImage = { bytes: Uint8Array<ArrayBuffer>; box: z.infer<typeof imageBoxSchema>; fallback: boolean };
 
 async function fallbackImage(width: number, height: number, index: number) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 1000 1000" preserveAspectRatio="none">
@@ -149,7 +166,7 @@ export async function preparePresentationImages(
             fit: "cover",
             position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
           }).jpeg({ quality: 87 }).toBuffer();
-          images.set(page.slideId, { bytes, box, fallback: false });
+          images.set(page.slideId, { bytes: new Uint8Array(bytes), box, fallback: false });
           continue;
         } catch (error) {
           signal?.throwIfAborted();
@@ -158,7 +175,7 @@ export async function preparePresentationImages(
       }
       const { w, h } = sideOrContentBox;
       const bytes = await fallbackImage(Math.round(w * 135), Math.round(h * 135), index);
-      images.set(page.slideId, { bytes, box: sideOrContentBox, fallback: true });
+      images.set(page.slideId, { bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true });
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
@@ -177,6 +194,17 @@ export async function renderPresentation(
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
   const titleOptions = { ...textOptions, fontFace: "Georgia", bold: true } as const;
   const slidesWithGradient = new Set<string>();
+  const customFonts = new Map<string, string>();
+
+  function textStyle(style: z.infer<typeof textStyleSchema> | undefined) {
+    if (!style?.fontFace) return style;
+    // PptxGenJS inserts font names into XML attributes without escaping them.
+    const { fontFace, ...options } = style;
+    const token = `PptxCustomFont${customFonts.size}`;
+    customFonts.set(token, fontFace.replaceAll("&", "&amp;").replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;").replaceAll(">", "&gt;"));
+    return { ...options, fontFace: token };
+  }
 
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
@@ -187,7 +215,7 @@ export async function renderPresentation(
     const hasFullSlideImage = image?.box.w === fullSlideImageBox.w && image.box.h === fullSlideImageBox.h;
     if (image) {
       slide.addImage({
-        data: `image/jpeg;base64,${image.bytes.toString("base64")}`,
+        data: `image/jpeg;base64,${Buffer.from(image.bytes.buffer, image.bytes.byteOffset, image.bytes.byteLength).toString("base64")}`,
         ...image.box,
         altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
       });
@@ -200,15 +228,25 @@ export async function renderPresentation(
         slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
       }
     }
+    const imageOverlapsPageNumber = image &&
+      image.box.x < pageNumberBox.x + pageNumberBox.w && image.box.x + image.box.w > pageNumberBox.x &&
+      image.box.y < pageNumberBox.y + pageNumberBox.h && image.box.y + image.box.h > pageNumberBox.y;
+    slide.addText(`${index + 1} / ${presentation.slides.length}`, {
+      ...textOptions, ...pageNumberBox, objectName: "页码", align: "right", fontSize: 10, margin: [0, 5, 0, 5],
+      color: imageOverlapsPageNumber ? presentation.palette.lightBackground : colors.text,
+      fill: imageOverlapsPageNumber ? { color: presentation.palette.darkBackground } : undefined,
+    });
+
     if (page.layout === "cover") {
       const width = hasFirstSlideImage ? firstSlideTextWidth : image ? 5.4 : 11.6;
       slide.addText(page.title, {
         ...titleOptions, x: 0.85, y: image || page.subtitle ? 1.52 : 2.48, w: width,
-        h: 2.55, fontSize: 40, color: colors.text,
+        h: 2.55, fontSize: 40, color: colors.text, ...textStyle(page.textStyles?.title),
       });
       if (page.subtitle) {
         slide.addText(page.subtitle, {
           ...textOptions, x: 0.85, y: 4.23, w: width, h: 1.45, fontSize: 20, color: colors.text,
+          ...textStyle(page.textStyles?.subtitle),
         });
       }
       continue;
@@ -216,7 +254,7 @@ export async function renderPresentation(
 
     slide.addText(page.title, {
       ...titleOptions, x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6,
-      h: 1.15, fontSize: 32, color: colors.text,
+      h: 1.15, fontSize: 32, color: colors.text, ...textStyle(page.textStyles?.title),
     });
 
     if (page.layout === "two-columns") {
@@ -228,14 +266,17 @@ export async function renderPresentation(
       const columnGap = 0.4;
       const columnWidth = hasFirstSlideImage ? (firstSlideTextWidth - columnGap) / 2 : 5.4;
       const rightColumnX = hasFirstSlideImage ? 0.85 + columnWidth + columnGap : 7.0;
-      for (const [column, x] of [[page.left, 0.85], [page.right, rightColumnX]] as const) {
+      for (const [side, x] of [["left", 0.85], ["right", rightColumnX]] as const) {
+        const column = page[side];
         slide.addText(column.heading, {
           ...textOptions, x, y: headingY, w: columnWidth, h: 0.55, fontSize: 20, bold: true, color: headingColor,
+          ...textStyle(page.textStyles?.[`${side}Heading`]),
         });
         column.points.forEach((point, index) => {
           slide.addText(point, {
             ...textOptions, x, y: headingY + 0.62 + pointSpacing * index, w: columnWidth, h: pointSpacing - 0.02,
             fontSize: 17, color: colors.text, bullet: { indent: 17 },
+            ...textStyle(page.textStyles?.[`${side}Point${index + 1}`]),
           });
         });
       }
@@ -245,7 +286,7 @@ export async function renderPresentation(
     page.points.forEach((point, index) => {
       slide.addText(point, {
         ...textOptions, x: 0.85, y: 1.94 + 1.24 * index, w: image ? firstSlideTextWidth : 11.6, h: 1.17,
-        fontSize: 20, color: colors.text, bullet: { indent: 19 },
+        fontSize: 20, color: colors.text, bullet: { indent: 19 }, ...textStyle(page.textStyles?.[`point${index + 1}`]),
       });
     });
   }
@@ -255,10 +296,12 @@ export async function renderPresentation(
 
   const archive = await JSZip.loadAsync(bytes);
   await Promise.all(archive.file(/^ppt\/slides\/slide\d+\.xml$/).map(async (part) => {
-    // PptxGenJS writes fontFace to every script. Set the East Asian font independently.
+    // Keep the template's East Asian defaults and apply explicit fonts to all scripts.
     let xml = (await part.async("string"))
       .replaceAll('<a:ea typeface="Georgia"', '<a:ea typeface="Songti SC"')
-      .replaceAll('<a:ea typeface="Arial"', '<a:ea typeface="Microsoft YaHei"');
+      .replaceAll('<a:ea typeface="Arial"', '<a:ea typeface="Microsoft YaHei"')
+      .replace(/(<a:(?:latin|ea|cs) typeface=")(PptxCustomFont\d+)"/g,
+        (match, prefix: string, token: string) => customFonts.has(token) ? `${prefix}${customFonts.get(token)}"` : match);
     if (slidesWithGradient.has(part.name)) {
       // PptxGenJS cannot set a gradient fill on a shape through its public API.
       const maskFill = /(<p:sp><p:nvSpPr><p:cNvPr id="\d+" name="渐变遮罩">[\s\S]*?<\/a:prstGeom>)<a:noFill\/>/;

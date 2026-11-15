@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { generateText, NoObjectGeneratedError, Output, tool, type LanguageModel } from "ai";
 import { z } from "zod";
-import { getPrisma } from "./db";
-import { getSlideColors, preparePresentationImages, presentationSchema, renderPresentation } from "./presentations";
+import { preparePresentationImages, presentationSchema } from "./presentations";
+import { savePresentation } from "./save-presentation";
 
 type ProviderOptions = Parameters<typeof generateText>[0]["providerOptions"];
 
@@ -69,7 +69,7 @@ async function writePresentation(
 
 export function createPresentationTool(model: LanguageModel, userId: string, providerOptions: ProviderOptions) {
   return tool({
-    description: `Create and deliver an editable PowerPoint (.pptx) file. Use this when the user asks to make, export, or revise a presentation file, including from earlier messages. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
+    description: `Create and deliver a new editable PowerPoint (.pptx) file. For text changes to an existing PPT, use updateTextElement. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
     inputSchema: z.object({
       topic: z.string().trim().min(1).max(240).describe("Presentation topic or working title"),
       audience: z.string().trim().min(1).max(160).optional(),
@@ -91,33 +91,8 @@ export function createPresentationTool(model: LanguageModel, userId: string, pro
           ...content,
           slides: content.slides.map((slide) => ({ ...slide, slideId: randomUUID() })),
         };
-        const slideColors = getSlideColors(source);
         const images = await preparePresentationImages(source, abortSignal);
-        const bytes = await renderPresentation(source, slideColors, images);
-        abortSignal?.throwIfAborted();
-        const presentation = await getPrisma().presentation.create({
-          data: {
-            userId,
-            title: source.title,
-            bytes,
-            source,
-            images: {
-              create: Array.from(images, ([slideId, image]) => ({
-                slideId,
-                bytes: new Uint8Array(image.bytes),
-                box: image.box,
-                fallback: image.fallback,
-              })),
-            },
-          },
-          select: { id: true, title: true },
-        });
-
-        return {
-          ...presentation,
-          slideCount: source.slides.length,
-          fallbackImageCount: Array.from(images.values()).filter((image) => image.fallback).length,
-        };
+        return await savePresentation(userId, source, images, abortSignal);
       } catch (error) {
         abortSignal?.throwIfAborted();
         console.error("Presentation generation failed:", error instanceof Error ? error.name : "UnknownError");

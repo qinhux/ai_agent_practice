@@ -5,7 +5,7 @@ import { generateImageAsset, imageAspectRatios } from "./images";
 
 export function createImageTool(userId: string) {
   return tool({
-    description: "Generate one image from text and deliver it in chat. Use for standalone image requests. For a new PowerPoint use generatePresentation. To edit an image in an existing PowerPoint use updateSlideElements.",
+    description: "Generate one image from text and deliver it in chat. Also use this to create an image asset before adding it to an existing slide with addOrRemoveSlideElements. For a new PowerPoint use generatePresentation. To edit an existing slide image use updateSlideElements.",
     inputSchema: z.object({
       prompt: z.string().trim().min(1).max(2000).describe("Subject, composition and visual style requested by the user."),
       aspectRatio: imageAspectRatios.optional().describe("Square, landscape or portrait. Defaults to square."),

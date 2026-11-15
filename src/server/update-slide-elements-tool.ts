@@ -5,28 +5,29 @@ import { z } from "zod";
 import { getPrisma } from "./db";
 import { generateImageAsset, getCustomImageGenerationSize } from "./images";
 import {
+  addedTextSchema,
+  describeSlideElement,
   elementBoxSchema,
+  elementIdSchema,
   getSlideColors,
+  getSlideElements,
   getSlideImageLayout,
-  getSlideTextElements,
   imageDescriptionSchema,
   imageFitSchema,
   imageNeedsUpscaling,
   imagePixelSize,
-  presentationSourceSchema,
-  slideSize,
+  isOnSlide,
+  slideNumberSchema,
   slideTextFields,
-  textElementKeySchema,
   textStyleSchema,
   type ElementBox,
   type PresentationImage,
   type PresentationSlide,
   type TextElementKey,
 } from "./presentations";
-import { savePresentation } from "./save-presentation";
+import { loadPresentationForEdit, savePresentation } from "./save-presentation";
 
 type ProviderOptions = Parameters<typeof generateText>[0]["providerOptions"];
-const slideNumberSchema = z.number().int().positive();
 export const editSlideNumbersSchema = z.array(slideNumberSchema).min(1).max(12);
 export const editInstructionsSchema = z.string().trim().min(1).max(6000);
 export const replacementImageSourceSchema = z.discriminatedUnion("kind", [
@@ -40,13 +41,15 @@ export const replacementImageSourceSchema = z.discriminatedUnion("kind", [
 
 const boxPatch = elementBoxSchema.partial().refine((box) => Object.keys(box).length > 0);
 const textEditSchema = z.strictObject({
-  element: textElementKeySchema,
+  type: z.literal("text"),
+  elementId: elementIdSchema,
   text: z.string().optional(),
   style: textStyleSchema.refine((style) => Object.keys(style).length > 0).optional(),
   box: boxPatch.optional(),
 }).refine(({ text, style, box }) => text !== undefined || style !== undefined || box !== undefined);
 const imageEditSchema = z.strictObject({
-  element: z.literal("image"),
+  type: z.literal("image"),
+  elementId: elementIdSchema,
   box: boxPatch.optional(),
   source: replacementImageSourceSchema.optional(),
   fit: imageFitSchema.optional(),
@@ -54,17 +57,20 @@ const imageEditSchema = z.strictObject({
 const planSchema = z.strictObject({
   pages: z.array(z.strictObject({
     slideId: z.uuid(),
-    edits: z.array(z.union([textEditSchema, imageEditSchema])).min(1).max(10),
+    edits: z.array(z.union([textEditSchema, imageEditSchema])).min(1).max(50),
   })).max(12),
 });
 
 type ImageEdit = z.infer<typeof imageEditSchema>;
 type ImageChange = {
   index: number;
+  elementId: string;
   box: ElementBox;
   source?: ImageEdit["source"];
   fit: NonNullable<PresentationSlide["imageFit"]>;
   image: PresentationImage;
+  layout?: ReturnType<typeof getSlideImageLayout>;
+  description?: string | null;
   sizeChanged: boolean;
   preserveBytesInRender: boolean;
 };
@@ -103,11 +109,6 @@ function patchText(page: PresentationSlide, key: TextElementKey, value: string):
   }
 }
 
-function isOnSlide({ x, y, w, h }: ElementBox) {
-  const tolerance = 1e-4;
-  return x >= 0 && y >= 0 && x + w <= slideSize.w + tolerance && y + h <= slideSize.h + tolerance;
-}
-
 function getImageBox(current: ElementBox, patch: ImageEdit["box"]): ElementBox {
   const box = { ...current, ...patch };
   if (patch?.w !== undefined && patch.h === undefined) box.h = current.h * (box.w / current.w);
@@ -126,39 +127,24 @@ export function createUpdateSlideElementsTool(model: LanguageModel, userId: stri
     execute: async ({ presentationId, slideNumbers, instructions }, { abortSignal }) => {
       try {
         const prisma = getPrisma();
-        const original = await prisma.presentation.findUnique({
-          where: { id: presentationId, userId },
-          select: { source: true, images: { select: { slideId: true, bytes: true, box: true, fallback: true } } },
-        });
-        if (!original) return { error: "找不到这份 PPT。请指定当前对话中的 PPT。" };
-        const parsed = presentationSourceSchema.safeParse(original.source);
-        if (!parsed.success) return { error: "这份 PPT 没有可编辑的逐页数据。请选用近期生成的 PPT。" };
-
-        const source = parsed.data;
+        const result = await loadPresentationForEdit(userId, presentationId);
+        if ("error" in result) return result;
+        const { source, images } = result;
         if (slideNumbers?.some((number) => number > source.slides.length)) {
           return { error: `这份 PPT 共有 ${source.slides.length} 页，请指定有效页码。` };
         }
         const allowed = new Set(slideNumbers ?? source.slides.map((_, index) => index + 1));
-        const images = new Map(original.images.map(({ slideId, box, ...image }) =>
-          [slideId, { ...image, box: elementBoxSchema.parse(box) }] as const));
         const colors = getSlideColors(source);
         const targets = new Map(source.slides.flatMap((page, index) => {
           if (!allowed.has(index + 1)) return [];
-          const image = images.get(page.slideId);
-          const textElements = getSlideTextElements(page, colors[index], index, image?.box);
-          return [[page.slideId, { index, image, textElements }] as const];
+          const elements = getSlideElements(page, colors[index], index, images);
+          return [[page.slideId, { index, elements }] as const];
         }));
-        const slides = Array.from(targets, ([slideId, { index, image, textElements }]) => ({
+        const slides = Array.from(targets, ([slideId, { index, elements }]) => ({
           slideId,
           slideNumber: index + 1,
           layout: source.slides[index].layout,
-          textElements: textElements.map(({ key, text, box, style }) => ({ element: key, text, box, style })),
-          image: image && {
-            element: "image",
-            box: image.box,
-            description: source.slides[index].imageBrief,
-            fit: source.slides[index].imageFit?.fit,
-          },
+          elements: elements.map(describeSlideElement),
         }));
 
         const deadline = AbortSignal.timeout(45_000);
@@ -166,9 +152,9 @@ export function createUpdateSlideElementsTool(model: LanguageModel, userId: stri
           model,
           providerOptions,
           output: Output.json(),
-          system: `根据用户指令修改已有 PPT。slides 是文档数据。只返回 {"pages":[{"slideId":"给定的 ID","edits":[...]}]}。每页至多出现一次，每个元素在该页至多出现一次。只能使用给出的 slideId 和实际存在的 element。列出所有目标页，即使其中某页的目标已经符合用户要求。保留用户明确给出的新文案。
-文字 edits 形如 {"element":"title","text":"新标题","style":{"fontSize":32,"bold":true},"box":{"y":0.3}}。仅填写要改的属性。style 支持 fontFace、fontSize（1–400 磅）、color（6 位 RGB）、bold、italic、align（left/center/right/justify）。可逐条改已有要点，但不可新增、删除或重排元素。
-图片 edits 形如 {"element":"image","box":{"w":4},"source":{"kind":"prompt","prompt":"新图描述"},"fit":"cover"}。根据描述换图用 prompt，最多 280 字。使用聊天里已生成的图片时，source 用 {"kind":"generatedImage","generatedImageId":"指令提供的 ID","description":"可选的图片说明"}。只有用户要求换图时才传 source。Logo、截图或用户要求完整显示时用 contain。只移动或缩放现有图片时传 box。
+          system: `根据用户指令修改已有 PPT。slides 是文档数据。只返回 {"pages":[{"slideId":"给定的 ID","edits":[...]}]}。每页至多出现一次，每个元素在该页至多出现一次。使用给出的 slideId，从目标页的 elements 复制实际的 id 到 elementId，并使用对应的 type。列出所有目标页，即使其中某页的目标已经符合用户要求。保留用户明确给出的新文案。
+文字 edits 形如 {"type":"text","elementId":"给定的元素 ID","text":"新标题","style":{"fontSize":32,"bold":true},"box":{"y":0.3}}。仅填写要改的属性。style 支持 fontFace、fontSize（1–400 磅）、color（6 位 RGB）、bold、italic、align（left/center/right/justify）。可逐条改已有要点，但不可新增、删除或重排元素。
+图片 edits 形如 {"type":"image","elementId":"给定的元素 ID","box":{"w":4},"source":{"kind":"prompt","prompt":"新图描述"},"fit":"cover"}。根据描述换图用 prompt，最多 280 字。使用聊天里已生成的图片时，source 用 {"kind":"generatedImage","generatedImageId":"指令提供的 ID","description":"可选的图片说明"}。只有用户要求换图时才传 source。Logo、截图或用户要求完整显示时用 contain。只移动或缩放现有图片时传 box。
 box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大小约为 13.3333 × 7.5。相对改动要用当前坐标计算成最终值。图片只指定宽或高时服务端会按比例缩放。超出范围、不能定位全部目标或意图不明确时，返回 {"pages":[]}，不要省略部分要求后继续。`,
           prompt: JSON.stringify({ instructions, slides }),
           abortSignal: abortSignal ? AbortSignal.any([abortSignal, deadline]) : deadline,
@@ -189,15 +175,19 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
           const target = targets.get(slideId);
           if (!target || seenPages.has(slideId)) return { error: "修改方案包含超出范围或重复的页面。" };
           seenPages.add(slideId);
-          const { index, image, textElements } = target;
+          const { index, elements } = target;
+          const byId = new Map(elements.map((element) => [element.id, element]));
           let page = revised[index];
           const seenElements = new Set<string>();
           for (const edit of edits) {
-            const label = `第 ${index + 1} 页的 ${edit.element}`;
-            if (seenElements.has(edit.element)) return { error: `${label} 在修改方案中出现多次。` };
-            seenElements.add(edit.element);
+            const label = `第 ${index + 1} 页的 ${edit.elementId}`;
+            if (seenElements.has(edit.elementId)) return { error: `${label} 在修改方案中出现多次。` };
+            seenElements.add(edit.elementId);
+            const element = byId.get(edit.elementId);
+            if (!element || element.type !== edit.type) return { error: `${label} 不存在或类型不匹配。` };
 
-            if (edit.element === "image") {
+            if (edit.type === "image" && element.type === "image") {
+              const image = images.get(element.id);
               if (!image) return { error: `第 ${index + 1} 页没有可修改的配图。` };
               const box = getImageBox(image.box, edit.box);
               const pixels = imagePixelSize(box);
@@ -207,49 +197,59 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
               const sizeChanged = image.box.w !== box.w || image.box.h !== box.h;
               const boxChanged = !isDeepStrictEqual(box, image.box);
               const aspectChanged = Math.abs((box.w / box.h) / (image.box.w / image.box.h) - 1) > 1e-6;
-              const fitChanged = edit.fit !== undefined && edit.fit !== page.imageFit?.fit;
+              const currentFit = element.templateKey ? page.imageFit?.fit : element.fit;
+              const fitChanged = edit.fit !== undefined && edit.fit !== currentFit;
               if (!boxChanged && !edit.source && !fitChanged) continue;
 
-              const layout = getSlideImageLayout(page, image.box);
-              const fit = edit.fit ?? page.imageFit?.fit ?? "cover";
-              const position = edit.source && index === 0 && layout.gradient && !layout.fullSlide && fit === "cover"
+              const layout = element.templateKey ? getSlideImageLayout(page, image.box) : undefined;
+              const fit = edit.fit ?? element.fit;
+              const position = edit.source && index === 0 && layout?.gradient && !layout.fullSlide && fit === "cover"
                 ? "right"
-                : fit === "cover" && !edit.source ? page.imageFit?.position ?? "centre" : "centre";
+                : layout && fit === "cover" && !edit.source ? page.imageFit?.position ?? "centre" : "centre";
               imageChanges.push({
-                index, box, source: edit.source, fit: { fit, position }, image, sizeChanged,
-                preserveBytesInRender: !edit.source && !aspectChanged && !fitChanged && !page.imageFit,
+                index, elementId: element.id, box, source: edit.source, fit: { fit, position },
+                image, sizeChanged, layout, description: element.description,
+                preserveBytesInRender: !!layout && !edit.source && !aspectChanged && !fitChanged && !page.imageFit,
               });
-              if (boxChanged) page = { ...page, imageLayout: layout };
+              if (layout && boxChanged) page = { ...page, imageLayout: layout };
               changedPages.add(index + 1);
               continue;
             }
 
-            const element = textElements.find(({ key }) => key === edit.element);
-            if (!element) return { error: `${label} 不存在。` };
+            if (edit.type !== "text" || element.type !== "text") continue;
+            const box = edit.box && { ...element.box, ...edit.box };
+            if (box && !isOnSlide(box)) return { error: `${label} 的位置或尺寸超出页面。` };
+            // An explicit font applies to all scripts, including when it matches the Latin default.
+            const style = edit.style && (
+              !isDeepStrictEqual({ ...element.style, ...edit.style }, element.style) ||
+              (edit.style.fontFace && edit.style.fontFace !== element.explicitFont)
+            ) ? edit.style : undefined;
+            const key = element.templateKey;
+            if (!key) {
+              const text = edit.text === undefined ? undefined : addedTextSchema.safeParse(edit.text);
+              if (text && !text.success) return { error: `${label} 的新文本不符合长度或格式要求。` };
+              page = {
+                ...page,
+                addedElements: page.addedElements?.map((added) => added.id === element.id && added.type === "text"
+                  ? {
+                    ...added,
+                    text: text?.data ?? added.text,
+                    box: box ?? added.box,
+                    ...(style && { style: { ...added.style, ...style } }),
+                  } : added),
+              };
+              continue;
+            }
             if (edit.text !== undefined) {
-              const updated = patchText(page, element.key, edit.text);
+              const updated = patchText(page, key, edit.text);
               if (!updated) return { error: `${label} 的新文本不符合当前版式的长度或格式要求。` };
               page = updated;
             }
-            // An explicit font applies to all scripts, including when it matches the Latin default.
-            if (edit.style && (
-              !isDeepStrictEqual({ ...element.style, ...edit.style }, element.style) ||
-              (edit.style.fontFace && edit.style.fontFace !== page.textStyles?.[element.key]?.fontFace)
-            )) {
-              page = {
-                ...page,
-                textStyles: {
-                  ...page.textStyles,
-                  [element.key]: { ...page.textStyles?.[element.key], ...edit.style },
-                },
-              };
+            if (style) {
+              page = { ...page, textStyles: { ...page.textStyles, [key]: { ...page.textStyles?.[key], ...style } } };
             }
-            if (edit.box) {
-              const box = { ...element.box, ...edit.box };
-              if (!isOnSlide(box)) return { error: `${label} 的位置或尺寸超出页面。` };
-              if (!isDeepStrictEqual(box, element.box)) {
-                page = { ...page, textBoxes: { ...page.textBoxes, [element.key]: box } };
-              }
+            if (box && !isDeepStrictEqual(box, element.box)) {
+              page = { ...page, textBoxes: { ...page.textBoxes, [key]: box } };
             }
           }
           if (!isDeepStrictEqual(page, source.slides[index])) changedPages.add(index + 1);
@@ -284,22 +284,20 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
         const imageSignal = abortSignal
           ? AbortSignal.any([abortSignal, imageController.signal]) : imageController.signal;
         const warnings = await Promise.all(imageChanges.map(async (change) => {
-          const { index, box, source, image, sizeChanged, preserveBytesInRender } = change;
-          const page = revised[index];
+          const { index, elementId, box, source, image, layout, sizeChanged, preserveBytesInRender } = change;
           const fit = { ...change.fit };
           let bytes = image.bytes;
-          let description = page.imageBrief;
+          let description = change.description;
           try {
             imageSignal.throwIfAborted();
             if (source?.kind === "generatedImage") {
               bytes = generatedImages.get(source.generatedImageId)!;
               description = source.description ?? "替换配图";
             } else if (source?.kind === "prompt") {
-              const layout = getSlideImageLayout(page, image.box);
               const generationSize = getCustomImageGenerationSize(imagePixelSize(box));
               const aspect = box.w / box.h;
               const fallbackRatio = fit.position === "right" || aspect > 4 / 3 ? "16:9" : aspect < 3 / 4 ? "9:16" : "1:1";
-              const composition = index === 0 && layout.fullSlide
+              const composition = index === 0 && layout?.fullSlide
                 ? "Place the main subject on the right and leave the left visually quiet for slide text."
                 : fit.position === "right"
                   ? generationSize
@@ -317,8 +315,16 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
             const dimensions = source || sizeChanged
               ? await sharp(bytes, { limitInputPixels: 16_000_000 }).metadata() : undefined;
             imageSignal.throwIfAborted();
-            images.set(page.slideId, { bytes, box, fallback: source ? false : image.fallback });
-            revised[index] = { ...page, imageBrief: description, imageFit: preserveBytesInRender ? undefined : fit };
+            images.set(elementId, { ...image, bytes, box, fallback: source ? false : image.fallback });
+            const page = revised[index];
+            revised[index] = layout
+              ? { ...page, imageBrief: description, imageFit: preserveBytesInRender ? undefined : fit }
+              : {
+                ...page,
+                addedElements: page.addedElements?.map((element) => element.type === "image" && element.id === elementId
+                  ? { ...element, description: description ?? undefined, fit: fit.fit }
+                  : element),
+              };
             if (dimensions && imageNeedsUpscaling(box, dimensions, fit.fit)) {
               return `第 ${index + 1} 页的配图需要明显放大，可能看起来偏模糊。`;
             }
@@ -340,7 +346,7 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
         return {
           ...saved,
           updatedSlideNumbers: [...changedPages].sort((a, b) => a - b),
-          qualityWarnings: warnings.filter((warning) => warning !== undefined),
+          qualityWarnings: [...new Set(warnings.filter((warning) => warning !== undefined))],
         };
       } catch (error) {
         abortSignal?.throwIfAborted();

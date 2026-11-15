@@ -52,11 +52,12 @@ model PresentationImage {
   presentationId String
   presentation   Presentation @relation(fields: [presentationId], references: [id], onDelete: Cascade)
   slideId        String
+  elementId      String
   bytes          Bytes
   box            Json
   fallback       Boolean
 
-  @@id([presentationId, slideId])
+  @@id([presentationId, elementId])
 }
 
 model Session {

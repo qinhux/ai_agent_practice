@@ -75,6 +75,30 @@ export const elementBoxSchema = z.strictObject({
 export const imageFitSchema = z.enum(["cover", "contain"]);
 const imagePositionSchema = z.enum(["centre", "right"]);
 const imageLayoutSchema = z.object({ fullSlide: z.boolean(), gradient: z.boolean() });
+export const slideNumberSchema = z.number().int().positive();
+export const elementIdSchema = z.string().min(1).max(64);
+export const addedTextSchema = slideText(500);
+const addedTextDefinition = z.strictObject({
+  type: z.literal("text"),
+  text: addedTextSchema,
+  box: elementBoxSchema,
+  style: textStyleSchema.optional(),
+});
+const addedImageDefinition = z.strictObject({
+  type: z.literal("image"),
+  generatedImageId: z.uuid(),
+  box: elementBoxSchema,
+  description: imageDescriptionSchema.optional(),
+  fit: imageFitSchema.optional(),
+});
+export const slideElementDefinitionSchema = z.discriminatedUnion("type", [
+  addedTextDefinition, addedImageDefinition,
+]);
+const addedElementSchema = z.discriminatedUnion("type", [
+  addedTextDefinition.extend({ id: z.uuid() }),
+  addedImageDefinition.omit({ generatedImageId: true, box: true }).extend({ id: z.uuid() }),
+]);
+export type AddedSlideElement = z.infer<typeof addedElementSchema>;
 const paletteSchema = z.object({
   lightBackground: hexColor,
   darkBackground: hexColor,
@@ -97,6 +121,8 @@ export const presentationSourceSchema = presentationSchema.extend({
     textBoxes: z.partialRecord(textElementKeySchema, elementBoxSchema).optional(),
     imageLayout: imageLayoutSchema.optional(),
     imageFit: z.object({ fit: imageFitSchema, position: imagePositionSchema }).optional(),
+    addedElements: z.array(addedElementSchema).optional(),
+    removedElementIds: z.array(elementIdSchema).optional(),
   }))).min(1).refine(
     (slides) => new Set(slides.map((page) => page.slideId)).size === slides.length,
   ),
@@ -122,6 +148,10 @@ export function getSlideColors({ slides, palette }: Presentation): SlideColors[]
 
 // LAYOUT_WIDE measures 13⅓ × 7½ inches.
 export const slideSize = { w: 40 / 3, h: 7.5 };
+export function isOnSlide({ x, y, w, h }: ElementBox) {
+  const tolerance = 1e-4;
+  return x >= 0 && y >= 0 && x + w <= slideSize.w + tolerance && y + h <= slideSize.h + tolerance;
+}
 const fullSlideImageBox = { x: 0, y: 0, ...slideSize };
 const firstSlideSideImageBox = { x: 7.5, y: 0, w: fullSlideImageBox.w - 7.5, h: fullSlideImageBox.h };
 const firstSlideTextWidth = 6.2;
@@ -135,7 +165,11 @@ const imageBoxes = {
 } as const;
 
 export type ElementBox = z.infer<typeof elementBoxSchema>;
-export type PresentationImage = { bytes: Uint8Array<ArrayBuffer>; box: ElementBox; fallback: boolean };
+export type PresentationImage = { slideId: string; bytes: Uint8Array<ArrayBuffer>; box: ElementBox; fallback: boolean };
+
+export function templateElementId(slideId: string, key: TextElementKey | "image") {
+  return `${slideId}:${key}`;
+}
 
 export function getSlideImageLayout(page: PresentationSlide, box?: ElementBox) {
   return page.imageLayout ?? {
@@ -220,7 +254,7 @@ export async function preparePresentationImages(
             fit: "cover",
             position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
           });
-          images.set(page.slideId, { bytes, box, fallback: false });
+        images.set(templateElementId(page.slideId, "image"), { slideId: page.slideId, bytes, box, fallback: false });
           continue;
         } catch (error) {
           signal?.throwIfAborted();
@@ -229,7 +263,9 @@ export async function preparePresentationImages(
       }
       const { width, height } = imagePixelSize(sideOrContentBox);
       const bytes = await fallbackImage(width, height, index);
-      images.set(page.slideId, { bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true });
+      images.set(templateElementId(page.slideId, "image"), {
+        slideId: page.slideId, bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true,
+      });
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
@@ -260,6 +296,7 @@ export function getSlideTextElements(
     style: SlideTextElement["style"],
     bullet?: SlideTextElement["bullet"],
   ) {
+    if (page.removedElementIds?.includes(templateElementId(page.slideId, key))) return;
     elements.push({
       key, text, box: page.textBoxes?.[key] ?? box,
       style: { fontFace: "Arial", color: colors.text, ...style, ...page.textStyles?.[key] },
@@ -313,6 +350,53 @@ export function getSlideTextElements(
   return elements;
 }
 
+type SlideElement =
+  | ({ type: "text"; id: string; templateKey?: TextElementKey; explicitFont?: string }
+    & Omit<SlideTextElement, "key">)
+  | { type: "image"; id: string; templateKey?: "image"; box: ElementBox; description?: string; fit: "cover" | "contain" };
+
+export function getSlideElements(
+  page: PresentationSlide,
+  colors: SlideColors,
+  index: number,
+  images: ReadonlyMap<string, Pick<PresentationImage, "box">>,
+): SlideElement[] {
+  const imageId = templateElementId(page.slideId, "image");
+  const image = page.removedElementIds?.includes(imageId) ? undefined : images.get(imageId);
+  const elements: SlideElement[] = getSlideTextElements(page, colors, index, image?.box)
+    .map(({ key, ...element }) => ({
+      ...element, type: "text", id: templateElementId(page.slideId, key), templateKey: key,
+      explicitFont: page.textStyles?.[key]?.fontFace,
+    }));
+  if (image) {
+    elements.unshift({
+      type: "image", id: imageId, templateKey: "image", box: image.box,
+      description: page.imageBrief ?? undefined, fit: page.imageFit?.fit ?? "cover",
+    });
+  }
+  for (const element of page.addedElements ?? []) {
+    if (element.type === "text") {
+      elements.push({
+        ...element, style: { fontFace: "Arial", color: colors.text, fontSize: 20, ...element.style },
+        explicitFont: element.style?.fontFace,
+      });
+    } else {
+      const asset = images.get(element.id);
+      if (asset) elements.push({ ...element, box: asset.box, fit: element.fit ?? "cover" });
+    }
+  }
+  return elements;
+}
+
+export function describeSlideElement(element: SlideElement) {
+  if (element.type === "image") {
+    const { id, type, box, description, fit } = element;
+    return { id, type, box, description, fit };
+  }
+  const { id, type, box, text, style } = element;
+  return { id, type, box, text, style };
+}
+
 export async function renderPresentation(
   presentation: PresentationSource,
   slideColors: SlideColors[],
@@ -337,21 +421,24 @@ export async function renderPresentation(
     const slide = pptx.addSlide();
     const colors = slideColors[index];
     slide.background = { color: colors.background };
-    const image = images.get(page.slideId);
-    if (image) {
-      const bytes = page.imageFit
+    const elements = getSlideElements(page, colors, index, images);
+    const imageElements = elements.filter((element) => element.type === "image");
+    for (const element of imageElements) {
+      const image = images.get(element.id)!;
+      const fit = element.templateKey ? page.imageFit : { fit: element.fit, position: "centre" as const };
+      const bytes = fit
         ? await fitPresentationImage(sharp(image.bytes, { limitInputPixels: 16_000_000 }), image.box, {
-          ...page.imageFit,
+          ...fit,
           background: `#${presentation.palette.lightBackground}`,
         })
         : image.bytes;
       slide.addImage({
         data: `image/jpeg;base64,${Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")}`,
-        objectName: "image",
+        objectName: element.templateKey ?? element.id,
         ...image.box,
-        altText: image.fallback ? "装饰插图" : page.imageBrief ?? undefined,
+        altText: image.fallback ? "装饰插图" : element.description,
       });
-      if (getSlideImageLayout(page, image.box).gradient) {
+      if (element.templateKey && getSlideImageLayout(page, image.box).gradient) {
         slide.addShape(pptx.ShapeType.rect, {
           ...image.box,
           objectName: "渐变遮罩",
@@ -360,21 +447,22 @@ export async function renderPresentation(
         slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
       }
     }
-    const imageOverlapsPageNumber = image &&
-      image.box.x < pageNumberBox.x + pageNumberBox.w && image.box.x + image.box.w > pageNumberBox.x &&
-      image.box.y < pageNumberBox.y + pageNumberBox.h && image.box.y + image.box.h > pageNumberBox.y;
+    const imageOverlapsPageNumber = imageElements.some(({ box }) =>
+      box.x < pageNumberBox.x + pageNumberBox.w && box.x + box.w > pageNumberBox.x &&
+      box.y < pageNumberBox.y + pageNumberBox.h && box.y + box.h > pageNumberBox.y);
     slide.addText(`${index + 1} / ${presentation.slides.length}`, {
       ...textOptions, ...pageNumberBox, objectName: "页码", align: "right", fontSize: 10, margin: [0, 5, 0, 5],
       color: imageOverlapsPageNumber ? presentation.palette.lightBackground : colors.text,
       fill: imageOverlapsPageNumber ? { color: presentation.palette.darkBackground } : undefined,
     });
 
-    for (const { key, text, box, style, bullet } of getSlideTextElements(page, colors, index, image?.box)) {
-      const explicitFont = page.textStyles?.[key]?.fontFace;
+    for (const element of elements) {
+      if (element.type !== "text") continue;
+      const { text, box, style, bullet, explicitFont, templateKey, id } = element;
       slide.addText(text, {
         ...textOptions, ...box, ...style,
         fontFace: explicitFont ? customFontFace(explicitFont) : style.fontFace,
-        objectName: key, bullet,
+        objectName: templateKey ?? id, bullet,
       });
     }
   }

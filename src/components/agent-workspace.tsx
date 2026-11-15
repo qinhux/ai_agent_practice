@@ -129,6 +129,7 @@ function Chat() {
                   );
                 }
                 if (part.type === "tool-generatePresentation" || part.type === "tool-updateSlideElements" ||
+                    part.type === "tool-addOrRemoveSlideElements" ||
                     part.type === "tool-updateTextElement" ||
                     part.type === "tool-editPresentation" || part.type === "tool-replaceImageElement") {
                   const isEdit = part.type !== "tool-generatePresentation";

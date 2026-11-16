@@ -2,7 +2,9 @@ import JSZip from "jszip";
 import pptxgen from "pptxgenjs";
 import sharp, { type ResizeOptions, type Sharp } from "sharp";
 import { z } from "zod";
-import { generateImageAsset } from "./images";
+import {
+  hexColor, luminance, savedPaletteSchema, themeFont, themeStyleSchema, type FontPair, type ThemeStyle,
+} from "./theme-generator";
 
 // 去掉字符串首尾的空白，要求至少有一个字符，并限制长度。正则会拒绝换行、制表符等字符，让每个字段以单行文本传给排版代码。
 function slideText(maxLength: number) {
@@ -38,23 +40,12 @@ export const slideContentSchema = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("summary"), title, points, closing: z.boolean().optional().catch(undefined), imageBrief }),
 ]);
 
-function luminance(color: string) {
-  const channels = [0, 2, 4].map((offset) => {
-    const channel = Number.parseInt(color.slice(offset, offset + 2), 16) / 255;
-    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
-}
-
 function contrastRatio(first: string, second: string) {
   const a = luminance(first);
   const b = luminance(second);
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
-const defaultPalette = { lightBackground: "F7F9FC", darkBackground: "142846", accent: "225AA5" };
-const hexColor = z.string().trim().regex(/^#?[0-9a-fA-F]{6}$/)
-  .transform((color) => color.replace(/^#/, "").toUpperCase());
 export const textStyleSchema = z.strictObject({
   fontFace: slideText(100).optional(),
   fontSize: z.number().min(1).max(400).optional(),
@@ -99,18 +90,11 @@ const addedElementSchema = z.discriminatedUnion("type", [
   addedImageDefinition.omit({ generatedImageId: true, box: true }).extend({ id: z.uuid() }),
 ]);
 export type AddedSlideElement = z.infer<typeof addedElementSchema>;
-const paletteSchema = z.object({
-  lightBackground: hexColor,
-  darkBackground: hexColor,
-  accent: hexColor,
-}).refine(({ lightBackground, darkBackground }) =>
-  luminance(lightBackground) >= 0.8 && luminance(darkBackground) <= 0.12,
-).catch(defaultPalette);
-
 export const presentationSchema = z.object({
   title: slideText(60),
   slides: z.array(slideContentSchema),
-  palette: paletteSchema,
+  palette: savedPaletteSchema,
+  theme: themeStyleSchema.optional(),
 });
 
 export const maxSlideCount = 12;
@@ -160,17 +144,8 @@ export function isOnSlide({ x, y, w, h }: ElementBox) {
   const tolerance = 1e-4;
   return x >= 0 && y >= 0 && x + w <= slideSize.w + tolerance && y + h <= slideSize.h + tolerance;
 }
-const fullSlideImageBox = { x: 0, y: 0, ...slideSize };
-const firstSlideSideImageBox = { x: 7.5, y: 0, w: fullSlideImageBox.w - 7.5, h: fullSlideImageBox.h };
 const firstSlideTextWidth = 6.2;
-const pageNumberBox = { x: fullSlideImageBox.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
-
-const imageBoxes = {
-  cover: { x: 6.66, y: 0.6, w: 5.82, h: 6.3 },
-  bullets: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
-  "two-columns": { x: 0.85, y: 1.73, w: 11.63, h: 2.22 },
-  summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
-} as const;
+const pageNumberBox = { x: slideSize.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
 
 export type ElementBox = z.infer<typeof elementBoxSchema>;
 export type PresentationImage = { slideId: string; bytes: Uint8Array<ArrayBuffer>; box: ElementBox; fallback: boolean };
@@ -210,91 +185,22 @@ export function imageNeedsUpscaling(
   return scale > 1.5;
 }
 
-async function fallbackImage(width: number, height: number, index: number) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 1000 1000" preserveAspectRatio="none">
-    <rect width="1000" height="1000" fill="#F4F4F5"/>
-    <circle cx="${260 + (index % 4) * 135}" cy="425" r="158" fill="#D4D4D8"/>
-    <path d="M0 690 Q250 320 540 645 T1000 584 V1000 H0 Z" fill="#A1A1AA"/>
-    <path d="M0 825 Q300 585 670 804 T1000 758 V1000 H0 Z" fill="#71717A"/>
-  </svg>`;
-  return sharp(Buffer.from(svg)).jpeg({ quality: 86 }).toBuffer();
-}
-
-// DrawingML alpha represents opacity in thousandths of a percent.
-const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
-  '<a:gs pos="0"><a:srgbClr val="000000"><a:alpha val="70000"/></a:srgbClr></a:gs>' +
-  '<a:gs pos="100000"><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:gs>' +
-  '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
-
-export async function preparePresentationImages(
-  { slides }: Pick<PresentationSource, "slides">,
-  signal?: AbortSignal,
-  slideIds?: ReadonlySet<string>,
-) {
-  const images = new Map<string, PresentationImage>();
-  const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
-  let nextIndex = 0;
-  async function worker() {
-    while (nextIndex < slides.length) {
-      signal?.throwIfAborted();
-      const index = nextIndex++;
-      const page = slides[index];
-      if (!page.imageBrief || (slideIds && !slideIds.has(page.slideId))) continue;
-
-      const isFirstSlide = page.appearance?.firstSlide ?? index === 0;
-      const sideOrContentBox = isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout];
-      if (configured) {
-        try {
-          const aspectRatio = isFirstSlide || page.layout === "two-columns" ? "16:9" : "1:1";
-          const composition = isFirstSlide
-            ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
-            : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
-          const prompt = `${page.imageBrief}. No text, captions, or presentation layout. ${composition}`;
-          const image = await generateImageAsset(prompt, aspectRatio, signal);
-          const source = sharp(image);
-          let box = sideOrContentBox;
-          if (isFirstSlide) {
-            const { width, height } = await source.metadata();
-            const slideAspect = fullSlideImageBox.w / fullSlideImageBox.h;
-            // Allow minor provider rounding (e.g. 1696 × 960 for a 16:9 request).
-            if (Math.abs(width / height / slideAspect - 1) <= 0.02) box = fullSlideImageBox;
-          }
-          const bytes = await fitPresentationImage(source, box, {
-            fit: "cover",
-            position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
-          });
-        images.set(templateElementId(page.slideId, "image"), { slideId: page.slideId, bytes, box, fallback: false });
-          continue;
-        } catch (error) {
-          signal?.throwIfAborted();
-          console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
-        }
-      }
-      const { width, height } = imagePixelSize(sideOrContentBox);
-      const bytes = await fallbackImage(width, height, index);
-      images.set(templateElementId(page.slideId, "image"), {
-        slideId: page.slideId, bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true,
-      });
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
-  signal?.throwIfAborted();
-  return images;
-}
-
 type SlideTextElement = {
   key: TextElementKey;
   text: string;
   box: ElementBox;
   style: z.infer<typeof textStyleSchema>;
+  font?: FontPair;
+  explicitFont?: string;
   bullet?: { indent: number };
 };
 
-export function getSlideTextElements(
+function getSlideTextElements(
   page: PresentationSlide,
   colors: SlideColors,
   index: number,
   imageBox?: ElementBox,
+  theme?: ThemeStyle,
 ): SlideTextElement[] {
   const elements: SlideTextElement[] = [];
   const hasFirstSlideImage = (page.appearance?.firstSlide ?? index === 0) && Boolean(imageBox);
@@ -306,9 +212,13 @@ export function getSlideTextElements(
     bullet?: SlideTextElement["bullet"],
   ) {
     if (page.removedElementIds?.includes(templateElementId(page.slideId, key))) return;
+    const override = page.textStyles?.[key];
+    const font = resolveFont(override?.fontFace, theme, key === "title" ? "title" : "body");
     elements.push({
       key, text, box: page.textBoxes?.[key] ?? box,
-      style: { fontFace: "Arial", color: colors.text, ...style, ...page.textStyles?.[key] },
+      style: { fontFace: "Arial", color: colors.text, ...style, ...override, ...(font && { fontFace: font.latin }) },
+      font,
+      explicitFont: override?.fontFace,
       bullet,
     });
   }
@@ -359,8 +269,13 @@ export function getSlideTextElements(
   return elements;
 }
 
+function resolveFont(explicit: string | undefined, theme: ThemeStyle | undefined, role: "title" | "body") {
+  if (explicit) return { latin: explicit, eastAsian: explicit };
+  return theme ? themeFont(theme, role) : undefined;
+}
+
 type SlideElement =
-  | ({ type: "text"; id: string; templateKey?: TextElementKey; explicitFont?: string }
+  | ({ type: "text"; id: string; templateKey?: TextElementKey }
     & Omit<SlideTextElement, "key">)
   | { type: "image"; id: string; templateKey?: "image"; box: ElementBox; description?: string; fit: "cover" | "contain" };
 
@@ -369,13 +284,13 @@ export function getSlideElements(
   colors: SlideColors,
   index: number,
   images: ReadonlyMap<string, Pick<PresentationImage, "box">>,
+  theme?: ThemeStyle,
 ): SlideElement[] {
   const imageId = templateElementId(page.slideId, "image");
   const image = page.removedElementIds?.includes(imageId) ? undefined : images.get(imageId);
-  const elements: SlideElement[] = getSlideTextElements(page, colors, index, image?.box)
+  const elements: SlideElement[] = getSlideTextElements(page, colors, index, image?.box, theme)
     .map(({ key, ...element }) => ({
       ...element, type: "text", id: templateElementId(page.slideId, key), templateKey: key,
-      explicitFont: page.textStyles?.[key]?.fontFace,
     }));
   if (image) {
     elements.unshift({
@@ -385,9 +300,10 @@ export function getSlideElements(
   }
   for (const element of page.addedElements ?? []) {
     if (element.type === "text") {
+      const font = resolveFont(element.style?.fontFace, theme, "body");
       elements.push({
-        ...element, style: { fontFace: "Arial", color: colors.text, fontSize: 20, ...element.style },
-        explicitFont: element.style?.fontFace,
+        ...element, font, explicitFont: element.style?.fontFace,
+        style: { fontFace: font?.latin ?? "Arial", color: colors.text, fontSize: 20, ...element.style },
       });
     } else {
       const asset = images.get(element.id);
@@ -406,6 +322,12 @@ export function describeSlideElement(element: SlideElement) {
   return { id, type, box, text, style };
 }
 
+// DrawingML alpha represents opacity in thousandths of a percent.
+const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
+  '<a:gs pos="0"><a:srgbClr val="000000"><a:alpha val="70000"/></a:srgbClr></a:gs>' +
+  '<a:gs pos="100000"><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:gs>' +
+  '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
+
 export async function renderPresentation(
   presentation: PresentationSource,
   slideColors: SlideColors[],
@@ -416,13 +338,14 @@ export async function renderPresentation(
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
   const slidesWithGradient = new Set<string>();
-  const customFonts = new Map<string, string>();
+  const customFonts = new Map<string, FontPair>();
 
-  function customFontFace(fontFace: string) {
+  function customFontFace(font: FontPair) {
     // PptxGenJS inserts font names into XML attributes without escaping them.
     const token = `PptxCustomFont${customFonts.size}`;
-    customFonts.set(token, fontFace.replaceAll("&", "&amp;").replaceAll('"', "&quot;")
-      .replaceAll("<", "&lt;").replaceAll(">", "&gt;"));
+    const escape = (name: string) => name.replaceAll("&", "&amp;").replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    customFonts.set(token, { latin: escape(font.latin), eastAsian: escape(font.eastAsian) });
     return token;
   }
 
@@ -430,7 +353,7 @@ export async function renderPresentation(
     const slide = pptx.addSlide();
     const colors = slideColors[index];
     slide.background = { color: colors.background };
-    const elements = getSlideElements(page, colors, index, images);
+    const elements = getSlideElements(page, colors, index, images, presentation.theme);
     const imageElements = elements.filter((element) => element.type === "image");
     for (const element of imageElements) {
       const image = images.get(element.id)!;
@@ -463,14 +386,15 @@ export async function renderPresentation(
       ...textOptions, ...pageNumberBox, objectName: "页码", align: "right", fontSize: 10, margin: [0, 5, 0, 5],
       color: imageOverlapsPageNumber ? presentation.palette.lightBackground : colors.text,
       fill: imageOverlapsPageNumber ? { color: presentation.palette.darkBackground } : undefined,
+      ...(presentation.theme && { fontFace: customFontFace(themeFont(presentation.theme, "body")) }),
     });
 
     for (const element of elements) {
       if (element.type !== "text") continue;
-      const { text, box, style, bullet, explicitFont, templateKey, id } = element;
+      const { text, box, style, bullet, font, templateKey, id } = element;
       slide.addText(text, {
         ...textOptions, ...box, ...style,
-        fontFace: explicitFont ? customFontFace(explicitFont) : style.fontFace,
+        fontFace: font ? customFontFace(font) : style.fontFace,
         objectName: templateKey ?? id, bullet,
       });
     }
@@ -481,12 +405,14 @@ export async function renderPresentation(
 
   const archive = await JSZip.loadAsync(bytes);
   await Promise.all(archive.file(/^ppt\/slides\/slide\d+\.xml$/).map(async (part) => {
-    // Keep the template's East Asian defaults and apply explicit fonts to all scripts.
+    // Keep legacy East Asian defaults and resolve per-script fonts for themed and edited text.
     let xml = (await part.async("string"))
       .replaceAll('<a:ea typeface="Georgia"', '<a:ea typeface="Songti SC"')
       .replaceAll('<a:ea typeface="Arial"', '<a:ea typeface="Microsoft YaHei"')
-      .replace(/(<a:(?:latin|ea|cs) typeface=")(PptxCustomFont\d+)"/g,
-        (match, prefix: string, token: string) => customFonts.has(token) ? `${prefix}${customFonts.get(token)}"` : match);
+      .replace(/<a:(latin|ea|cs) typeface="(PptxCustomFont\d+)"/g, (match, script: string, token: string) => {
+        const font = customFonts.get(token);
+        return font ? `<a:${script} typeface="${script === "ea" ? font.eastAsian : font.latin}"` : match;
+      });
     if (slidesWithGradient.has(part.name)) {
       // PptxGenJS cannot set a gradient fill on a shape through its public API.
       const maskFill = /(<p:sp><p:nvSpPr><p:cNvPr id="\d+" name="渐变遮罩">[\s\S]*?<\/a:prstGeom>)<a:noFill\/>/;

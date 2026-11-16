@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { tool } from "ai";
 import { z } from "zod";
+import { preparePresentationImages } from "./asset-manager";
 import { getPrisma } from "./db";
 import type { PresentationDrafts } from "./presentation-drafts";
 import {
   getSlideAppearance,
   maxSlideCount,
-  preparePresentationImages,
   slideContentSchema,
   slideNumberSchema,
   type PresentationSlide,

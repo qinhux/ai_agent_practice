@@ -137,7 +137,7 @@ export function createUpdateSlideElementsTool(
           const colors = getSlideColors(source);
           const targets = new Map(source.slides.flatMap((page, index) => {
             if (!allowed.has(index + 1)) return [];
-            const elements = getSlideElements(page, colors[index], index, images);
+            const elements = getSlideElements(page, colors[index], index, images, source.theme);
             return [[page.slideId, { index, elements }] as const];
           }));
           const slides = Array.from(targets, ([slideId, { index, elements }]) => ({

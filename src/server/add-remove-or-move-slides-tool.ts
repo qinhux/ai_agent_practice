@@ -31,7 +31,10 @@ const operationSchema = z.discriminatedUnion("op", [
   z.strictObject({
     op: z.literal("add"),
     position: positionSchema,
-    slides: z.array(slideContentSchema).min(1).max(maxSlideCount),
+    slides: z.array(slideContentSchema.refine(
+      (page) => page.layout !== "image-focus" || Boolean(page.imageBrief),
+      { path: ["imageBrief"], message: "新增图文解读页需要提供配图描述。" },
+    )).min(1).max(maxSlideCount),
   }),
   z.strictObject({ op: z.literal("remove"), targets: z.array(slideReferenceSchema).min(1).max(maxSlideCount) }),
   z.strictObject({ op: z.literal("move"), target: slideReferenceSchema, position: positionSchema }),
@@ -68,7 +71,7 @@ function slideDirectory(slides: readonly PresentationSlide[]) {
 
 export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: PresentationDrafts) {
   return tool({
-    description: "List whole slides or stage an ordered batch that adds, removes, and/or moves whole slides in a PowerPoint draft. List first to resolve the user's original page numbers or titles to stable slide IDs. Use currentSlideNumber only when the user explicitly refers to the order after earlier operations. All references within one operation are resolved before that operation changes the order.",
+    description: "List whole slides or stage an ordered batch that adds, removes, and/or moves whole slides in a PowerPoint draft. List first to resolve the user's original page numbers or titles to stable slide IDs. New metrics slides use 1–3 sourced values with units, steps use 3–5 ordered nodes, and image-focus uses an imageBrief for an AI illustration and 1–2 observations. Use currentSlideNumber only when the user explicitly refers to the order after earlier operations. All references within one operation are resolved before that operation changes the order.",
     inputSchema: slideOperationsInputSchema,
     execute: async (input, { abortSignal }) => {
       const { presentationId } = input;

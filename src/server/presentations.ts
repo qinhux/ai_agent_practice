@@ -24,12 +24,18 @@ const points = slidePoints(4, 90);
 const column = z.object({ heading: slideText(26), points: slidePoints(3, 60) });
 export const imageDescriptionSchema = slideText(280);
 const imageBrief = imageDescriptionSchema.nullish();
+const metricSchema = z.object({ value: slideText(14), label: slideText(20), detail: slideText(60) });
+const stepSchema = z.object({ marker: slideText(12).optional(), heading: slideText(14), detail: slideText(42) });
+const imageFocusPoints = z.array(slideText(72)).min(1).max(2);
 export const slideTextFields = {
   title,
   subtitle: slideText(90),
   points: z.array(slideText(90)).min(1).max(4),
   columnHeading: column.shape.heading,
   columnPoints: z.array(slideText(60)).min(1).max(3),
+  metric: metricSchema.shape,
+  step: stepSchema.shape,
+  imageFocusPoints,
 };
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
 export const slideContentSchema = z.discriminatedUnion("layout", [
@@ -38,6 +44,9 @@ export const slideContentSchema = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("bullets"), title, points, imageBrief }),
   z.object({ layout: z.literal("two-columns"), title, left: column, right: column, imageBrief }),
   z.object({ layout: z.literal("summary"), title, points, closing: z.boolean().optional().catch(undefined), imageBrief }),
+  z.object({ layout: z.literal("metrics"), title, metrics: z.array(metricSchema).min(1).max(3), imageBrief: z.null().optional() }),
+  z.object({ layout: z.literal("steps"), title, steps: z.array(stepSchema).min(3).max(5), imageBrief: z.null().optional() }),
+  z.object({ layout: z.literal("image-focus"), title, points: imageFocusPoints, imageBrief }),
 ]);
 
 function contrastRatio(first: string, second: string) {
@@ -58,6 +67,8 @@ export const textElementKeySchema = z.enum([
   "title", "subtitle", "point1", "point2", "point3", "point4",
   "leftHeading", "leftPoint1", "leftPoint2", "leftPoint3",
   "rightHeading", "rightPoint1", "rightPoint2", "rightPoint3",
+  ...([1, 2, 3] as const).flatMap((slot) => [`metric${slot}Value`, `metric${slot}Label`, `metric${slot}Detail`] as const),
+  ...([1, 2, 3, 4, 5] as const).flatMap((slot) => [`step${slot}Marker`, `step${slot}Heading`, `step${slot}Detail`] as const),
 ]);
 export type TextElementKey = z.infer<typeof textElementKeySchema>;
 export const elementBoxSchema = z.strictObject({
@@ -236,12 +247,47 @@ function getSlideTextElements(
   }
 
   add("title", page.title,
-    { x: 0.85, y: 0.5, w: hasFirstSlideImage ? firstSlideTextWidth : 11.6, h: 1.15 },
+    { x: 0.85, y: 0.5, w: hasFirstSlideImage && page.layout !== "image-focus" ? firstSlideTextWidth : 11.6, h: 1.15 },
     { fontFace: "Georgia", bold: true, fontSize: 32 });
-  if (page.layout === "two-columns") {
+  const accentText = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
+  if (page.layout === "metrics") {
+    const count = page.metrics.length;
+    const gap = 0.5;
+    const width = (11.6 - gap * (count - 1)) / count;
+    page.metrics.forEach(({ value, label, detail }, index) => {
+      const slot = (index + 1) as 1 | 2 | 3;
+      const x = 0.85 + index * (width + gap);
+      add(`metric${slot}Value`, value, { x, y: 2.1, w: width, h: 1.25 },
+        { fontSize: count === 1 ? 64 : 46, bold: true, color: accentText, align: "center" });
+      add(`metric${slot}Label`, label, { x, y: 3.5, w: width, h: 0.8 },
+        { fontSize: 22, bold: true, align: "center" });
+      add(`metric${slot}Detail`, detail, { x, y: 4.45, w: width, h: 1.55 },
+        { fontSize: 17, align: "center" });
+    });
+  } else if (page.layout === "steps") {
+    const gap = 0.35;
+    const width = (11.6 - gap * (page.steps.length - 1)) / page.steps.length;
+    const markerWidth = 1.55;
+    page.steps.forEach(({ marker, heading, detail }, index) => {
+      const slot = (index + 1) as 1 | 2 | 3 | 4 | 5;
+      const x = 0.85 + index * (width + gap);
+      add(`step${slot}Marker`, marker ?? String(slot), { x: x + (width - markerWidth) / 2, y: 2.04, w: markerWidth, h: 0.65 },
+        { fontSize: 20, bold: true, color: accentText, align: "center" });
+      add(`step${slot}Heading`, heading, { x, y: 2.91, w: width, h: 0.88 },
+        { fontSize: 20, bold: true, align: "center" });
+      add(`step${slot}Detail`, detail, { x, y: 3.95, w: width, h: 1.75 }, { fontSize: 17, align: "center" });
+    });
+  } else if (page.layout === "image-focus") {
+    page.points.forEach((point, index) => {
+      add(`point${(index + 1) as 1 | 2}`, point,
+        imageBox
+          ? { x: 9, y: 2.12 + 1.9 * index, w: 3.45, h: 1.75 }
+          : { x: 0.85, y: 1.94 + 1.4 * index, w: 11.6, h: 1.27 },
+        { fontSize: 20 }, { indent: 19 });
+    });
+  } else if (page.layout === "two-columns") {
     const { fullSlide } = getSlideImageLayout(page, imageBox);
-    const headingColor = !fullSlide && contrastRatio(colors.accent, colors.background) >= 4.5
-      ? colors.accent : colors.text;
+    const headingColor = fullSlide ? colors.text : accentText;
     const hasImageAboveColumns = imageBox && !hasFirstSlideImage;
     const headingY = hasImageAboveColumns ? 4.11 : 1.94;
     const pointSpacing = hasImageAboveColumns ? 0.76 : 1.24;
@@ -295,7 +341,7 @@ export function getSlideElements(
   if (image) {
     elements.unshift({
       type: "image", id: imageId, templateKey: "image", box: image.box,
-      description: page.imageBrief ?? undefined, fit: page.imageFit?.fit ?? "cover",
+      description: page.imageBrief ?? undefined, fit: page.imageFit?.fit ?? (page.layout === "image-focus" ? "contain" : "cover"),
     });
   }
   for (const element of page.addedElements ?? []) {
@@ -377,6 +423,19 @@ export async function renderPresentation(
           line: { transparency: 100 },
         });
         slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
+      }
+    }
+    if (page.layout === "steps") {
+      const markers = elements.filter((element) => element.type === "text" && /^step\dMarker$/.test(element.templateKey ?? ""));
+      const color = contrastRatio(colors.accent, colors.background) >= 3 ? colors.accent : colors.text;
+      for (const [index, marker] of markers.slice(1).entries()) {
+        const from = markers[index].box;
+        const to = marker.box;
+        const x = from.x + from.w + 0.08;
+        const y = from.y + from.h / 2;
+        const w = to.x - x - 0.08;
+        if (w <= 0 || Math.abs(y - to.y - to.h / 2) > 0.02) continue;
+        slide.addShape(pptx.ShapeType.line, { x, y, w, h: 0, line: { color, width: 1 } });
       }
     }
     const imageOverlapsPageNumber = imageElements.some(({ box }) =>

@@ -12,6 +12,7 @@ const imageBoxes = {
   bullets: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
   "two-columns": { x: 0.85, y: 1.73, w: 11.63, h: 2.22 },
   summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
+  "image-focus": { x: 0.85, y: 1.84, w: 7.72, h: 4.62 },
 } as const;
 
 async function fallbackImage(width: number, height: number, index: number) {
@@ -25,7 +26,7 @@ async function fallbackImage(width: number, height: number, index: number) {
 }
 
 export async function preparePresentationImages(
-  { slides, theme }: Pick<PresentationSource, "slides" | "theme">,
+  { slides, theme, palette }: Pick<PresentationSource, "slides" | "theme" | "palette">,
   signal?: AbortSignal,
   slideIds?: ReadonlySet<string>,
 ) {
@@ -39,11 +40,12 @@ export async function preparePresentationImages(
       const page = slides[index];
       if (!page.imageBrief || (slideIds && !slideIds.has(page.slideId))) continue;
 
-      const isFirstSlide = page.appearance?.firstSlide ?? index === 0;
+      const imageFocus = page.layout === "image-focus";
+      const isFirstSlide = !imageFocus && (page.appearance?.firstSlide ?? index === 0);
       const sideOrContentBox = isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout];
       if (configured) {
         try {
-          const aspectRatio = isFirstSlide || page.layout === "two-columns" ? "16:9" : "1:1";
+          const aspectRatio = isFirstSlide || imageFocus || page.layout === "two-columns" ? "16:9" : "1:1";
           const composition = isFirstSlide
             ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
             : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
@@ -59,8 +61,9 @@ export async function preparePresentationImages(
             if (Math.abs(width / height / slideAspect - 1) <= 0.02) box = fullSlideImageBox;
           }
           const bytes = await fitPresentationImage(source, box, {
-            fit: "cover",
+            fit: imageFocus ? "contain" : "cover",
             position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
+            ...(imageFocus && { background: `#${palette.lightBackground}` }),
           });
           images.set(templateElementId(page.slideId, "image"), { slideId: page.slideId, bytes, box, fallback: false });
           continue;
@@ -69,6 +72,7 @@ export async function preparePresentationImages(
           console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
         }
       }
+      if (imageFocus) continue;
       const { width, height } = imagePixelSize(sideOrContentBox);
       const bytes = await fallbackImage(width, height, index);
       images.set(templateElementId(page.slideId, "image"), {

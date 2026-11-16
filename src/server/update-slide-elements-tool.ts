@@ -84,8 +84,10 @@ function patchText(page: PresentationSlide, key: TextElementKey, value: string):
     return;
   }
 
-  if (page.layout === "bullets" || page.layout === "summary") {
-    const parsed = slideTextFields.points.element.safeParse(value);
+  if (page.layout === "bullets" || page.layout === "summary" || page.layout === "image-focus") {
+    if (!key.startsWith("point")) return;
+    const schema = page.layout === "image-focus" ? slideTextFields.imageFocusPoints : slideTextFields.points;
+    const parsed = schema.element.safeParse(value);
     if (!parsed.success) return;
     const position = Number(key.at(-1)) - 1;
     return { ...page, points: page.points.map((point, index) => index === position ? parsed.data : point) };
@@ -106,6 +108,30 @@ function patchText(page: PresentationSlide, key: TextElementKey, value: string):
       ...page,
       [side]: { ...column, points: column.points.map((point, index) => index === position ? parsed.data : point) },
     };
+  }
+
+  if (page.layout === "metrics") {
+    const match = /^metric([1-3])(Value|Label|Detail)$/.exec(key);
+    if (!match) return;
+    const position = Number(match[1]) - 1;
+    const field = match[2].toLowerCase() as keyof typeof slideTextFields.metric;
+    const parsed = slideTextFields.metric[field].safeParse(value);
+    if (parsed.success) {
+      return { ...page, metrics: page.metrics.map((metric, index) =>
+        index === position ? { ...metric, [field]: parsed.data } : metric) };
+    }
+  }
+
+  if (page.layout === "steps") {
+    const match = /^step([1-5])(Marker|Heading|Detail)$/.exec(key);
+    if (!match) return;
+    const position = Number(match[1]) - 1;
+    const field = match[2].toLowerCase() as keyof typeof slideTextFields.step;
+    const parsed = slideTextFields.step[field].safeParse(value);
+    if (parsed.success) {
+      return { ...page, steps: page.steps.map((step, index) =>
+        index === position ? { ...step, [field]: parsed.data } : step) };
+    }
   }
 }
 
@@ -319,14 +345,19 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
               imageSignal.throwIfAborted();
               images.set(elementId, { ...image, bytes, box, fallback: source ? false : image.fallback });
               const page = revised[index];
-              revised[index] = layout
-                ? { ...page, imageBrief: description, imageFit: preserveBytesInRender ? undefined : fit }
-                : {
+              if (layout) {
+                if (page.layout === "metrics" || page.layout === "steps") {
+                  throw new Error("This layout does not support a template image.");
+                }
+                revised[index] = { ...page, imageBrief: description, imageFit: preserveBytesInRender ? undefined : fit };
+              } else {
+                revised[index] = {
                   ...page,
                   addedElements: page.addedElements?.map((element) => element.type === "image" && element.id === elementId
                     ? { ...element, description: description ?? undefined, fit: fit.fit }
                     : element),
                 };
+              }
               if (dimensions && imageNeedsUpscaling(box, dimensions, fit.fit)) {
                 return `第 ${index + 1} 页的配图需要明显放大，可能看起来偏模糊。`;
               }

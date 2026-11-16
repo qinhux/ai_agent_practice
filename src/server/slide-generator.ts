@@ -46,7 +46,13 @@ content 使用以下结构：
 {"layout":"bullets","title":"...","points":["..."]}
 {"layout":"two-columns","title":"...","left":{"heading":"...","points":["..."]},"right":{"heading":"...","points":["..."]}}
 {"layout":"summary","title":"...","points":["..."]}
+{"layout":"metrics","title":"...","metrics":[{"value":"...","label":"...","detail":"..."}]}
+{"layout":"steps","title":"...","steps":[{"marker":"...","heading":"...","detail":"..."}]}
+{"layout":"image-focus","title":"...","points":["..."],"imageBrief":"..."}
 标题最多 50 字，副标题可选、最多 90 字，双栏小标题最多 26 字。bullets 或 summary 页包含 1–4 条要点，每条最多 90 字。双栏每栏 1–3 条要点，每条最多 60 字。
+metrics 写 1–3 项，value 最多 14 字并含必要单位，label 最多 20 字，detail 最多 60 字，用于解释口径或含义。忠实保留材料里的数值。
+steps 写 3–5 个有序节点，marker 用于日期或阶段标记，最多 12 字；省略时自动编号。heading 最多 14 字，detail 最多 42 字。
+image-focus 写 1–2 条解读，每条最多 72 字，围绕图中可示意的主体或结构。
 仅当最后一页是收尾用的 summary，且只有一条不超过 50 字的简短结论时，才添加 "closing":true。
 imageIntent 为 illustration 时，在 content 中用 imageBrief（最多 280 字）描述一张独立配图的主体和构图，可采用写实或插画风格。imageIntent 为 none 时省略 imageBrief。配图避免出现文字、幻灯片文案或图表，避免把生成的场景描述为实拍证据。
 所有文本使用单行纯文本。按需求指定的语言和主题风格写作，忠实使用提供的材料，保留用户指定的精确文案，避免编造统计数据、引文或来源。`,

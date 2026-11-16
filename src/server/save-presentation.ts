@@ -6,6 +6,7 @@ import {
   getSlideColors,
   presentationSourceSchema,
   renderPresentation,
+  templateElementId,
   type PresentationImage,
   type PresentationSource,
 } from "./presentations";
@@ -53,6 +54,9 @@ export async function preparePresentationDrafts(
   for (const { source, images, parentId, warnings } of drafts) {
     abortSignal.throwIfAborted();
     const bytes = await renderPresentation(source, getSlideColors(source), images);
+    const missingImagePages = source.slides.flatMap((page, index) =>
+      page.layout === "image-focus" && page.imageBrief && !images.has(templateElementId(page.slideId, "image"))
+        ? [index + 1] : []);
     prepared.push({
       data: {
         userId, parentId, title: source.title, bytes, source,
@@ -60,7 +64,9 @@ export async function preparePresentationDrafts(
       },
       slideCount: source.slides.length,
       fallbackImageCount: new Set([...images.values()].filter((image) => image.fallback).map((image) => image.slideId)).size,
-      warnings,
+      warnings: missingImagePages.length
+        ? [`第 ${missingImagePages.join("、")} 页的配图未能生成，已使用纯文字布局`, ...warnings]
+        : warnings,
     });
   }
   return async (transaction: Prisma.TransactionClient) => {

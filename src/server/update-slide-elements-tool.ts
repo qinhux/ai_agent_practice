@@ -203,7 +203,8 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
 
                 const layout = element.templateKey ? getSlideImageLayout(page, image.box) : undefined;
                 const fit = edit.fit ?? element.fit;
-                const position = edit.source && index === 0 && layout?.gradient && !layout.fullSlide && fit === "cover"
+                const firstSlide = page.appearance?.firstSlide ?? index === 0;
+                const position = edit.source && firstSlide && layout?.gradient && !layout.fullSlide && fit === "cover"
                   ? "right"
                   : layout && fit === "cover" && !edit.source ? page.imageFit?.position ?? "centre" : "centre";
                 imageChanges.push({
@@ -297,7 +298,8 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 const generationSize = getCustomImageGenerationSize(imagePixelSize(box));
                 const aspect = box.w / box.h;
                 const fallbackRatio = fit.position === "right" || aspect > 4 / 3 ? "16:9" : aspect < 3 / 4 ? "9:16" : "1:1";
-                const composition = index === 0 && layout?.fullSlide
+                const firstSlide = revised[index].appearance?.firstSlide ?? index === 0;
+                const composition = firstSlide && layout?.fullSlide
                   ? "Place the main subject on the right and leave the left visually quiet for slide text."
                   : fit.position === "right"
                     ? generationSize

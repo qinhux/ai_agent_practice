@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { generateText, NoObjectGeneratedError, Output, tool, type LanguageModel } from "ai";
 import { z } from "zod";
-import { preparePresentationImages, presentationSchema } from "./presentations";
+import { maxSlideCount, preparePresentationImages, presentationSchema } from "./presentations";
 import type { PresentationDrafts } from "./presentation-drafts";
 
 type ProviderOptions = Parameters<typeof generateText>[0]["providerOptions"];
 
 const defaultSlideCount = 8;
-const maxSlideCount = 12;
 
 // 把 PPT 制作需求变成经过校验的逐页数据
 async function writePresentation(
@@ -69,7 +68,7 @@ async function writePresentation(
 
 export function createPresentationTool(model: LanguageModel, drafts: PresentationDrafts, providerOptions: ProviderOptions) {
   return tool({
-    description: `Create a new editable PowerPoint draft for this turn. For existing PPTs, use updateSlideElements or addOrRemoveSlideElements. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
+    description: `Create a new editable PowerPoint draft for this turn. For existing PPTs, use addRemoveOrMoveSlides for whole slides, or updateSlideElements and addOrRemoveSlideElements for individual elements. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
     inputSchema: z.object({
       topic: z.string().trim().min(1).max(240).describe("Presentation topic or working title"),
       audience: z.string().trim().min(1).max(160).optional(),

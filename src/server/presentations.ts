@@ -30,7 +30,7 @@ export const slideTextFields = {
   columnPoints: z.array(slideText(60)).min(1).max(3),
 };
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
-const slide = z.discriminatedUnion("layout", [
+export const slideContentSchema = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("cover"), title, subtitle: slideText(90).optional(), imageBrief }),
   // 要点列表页。这一页有一个标题，正文在同一栏里逐条列出，每条前面有一个圆点 •
   z.object({ layout: z.literal("bullets"), title, points, imageBrief }),
@@ -109,14 +109,17 @@ const paletteSchema = z.object({
 
 export const presentationSchema = z.object({
   title: slideText(60),
-  slides: z.array(slide),
+  slides: z.array(slideContentSchema),
   palette: paletteSchema,
 });
 
-type Presentation = z.infer<typeof presentationSchema>;
+export const maxSlideCount = 12;
+
 export const presentationSourceSchema = presentationSchema.extend({
-  slides: z.array(slide.and(z.object({
+  slides: z.array(slideContentSchema.and(z.object({
     slideId: z.uuid(),
+    // Preserve the original position-dependent styling when an existing slide is reordered.
+    appearance: z.object({ firstSlide: z.boolean(), darkBackground: z.boolean() }).optional(),
     textStyles: z.partialRecord(textElementKeySchema, textStyleSchema).optional(),
     textBoxes: z.partialRecord(textElementKeySchema, elementBoxSchema).optional(),
     imageLayout: imageLayoutSchema.optional(),
@@ -131,13 +134,18 @@ export type PresentationSource = z.infer<typeof presentationSourceSchema>;
 export type PresentationSlide = PresentationSource["slides"][number];
 type SlideColors = { background: string; text: string; accent: string };
 
-export function getSlideColors({ slides, palette }: Presentation): SlideColors[] {
+export function getSlideAppearance(page: PresentationSlide, index: number, slideCount: number) {
+  const firstSlide = index === 0;
+  const isCover = firstSlide && page.layout === "cover";
+  const isClosing = index === slideCount - 1 && page.layout === "summary" &&
+    page.closing === true && page.points.length === 1 && page.points[0].length <= 50;
+  return page.appearance ?? { firstSlide, darkBackground: slideCount > 1 && (isCover || isClosing) };
+}
+
+export function getSlideColors({ slides, palette }: PresentationSource): SlideColors[] {
   const { lightBackground, darkBackground, accent } = palette;
   return slides.map((page, index) => {
-    const isCover = index === 0 && page.layout === "cover";
-    const isClosing = index === slides.length - 1 && page.layout === "summary" &&
-      page.closing && page.points.length === 1 && page.points[0].length <= 50;
-    const useDarkBackground = slides.length > 1 && (isCover || isClosing);
+    const { darkBackground: useDarkBackground } = getSlideAppearance(page, index, slides.length);
     return {
       background: useDarkBackground ? darkBackground : lightBackground,
       text: useDarkBackground ? lightBackground : darkBackground,
@@ -221,6 +229,7 @@ const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
 export async function preparePresentationImages(
   { slides }: Pick<PresentationSource, "slides">,
   signal?: AbortSignal,
+  slideIds?: ReadonlySet<string>,
 ) {
   const images = new Map<string, PresentationImage>();
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
@@ -230,9 +239,9 @@ export async function preparePresentationImages(
       signal?.throwIfAborted();
       const index = nextIndex++;
       const page = slides[index];
-      if (!page.imageBrief) continue;
+      if (!page.imageBrief || (slideIds && !slideIds.has(page.slideId))) continue;
 
-      const isFirstSlide = index === 0;
+      const isFirstSlide = page.appearance?.firstSlide ?? index === 0;
       const sideOrContentBox = isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout];
       if (configured) {
         try {
@@ -288,7 +297,7 @@ export function getSlideTextElements(
   imageBox?: ElementBox,
 ): SlideTextElement[] {
   const elements: SlideTextElement[] = [];
-  const hasFirstSlideImage = index === 0 && Boolean(imageBox);
+  const hasFirstSlideImage = (page.appearance?.firstSlide ?? index === 0) && Boolean(imageBox);
   function add(
     key: TextElementKey,
     text: string,

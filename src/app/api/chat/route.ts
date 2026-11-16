@@ -6,9 +6,11 @@ import {
   type InferUIMessageChunk,
 } from "ai";
 import { fileDeliverySchemas } from "@/lib/file-delivery";
-import { createAgent, legacyPresentationTools, type ChatMessage } from "@/server/agent";
+import { createAgent, createAgentModel, legacyPresentationTools, providerOptions, type ChatMessage } from "@/server/agent";
 import { getAuth } from "@/server/auth";
 import { FileDrafts } from "@/server/file-drafts";
+import { createToolRegistry } from "@/server/tool-registry";
+import { routeToolDomains } from "@/server/tool-router";
 
 export const runtime = "nodejs";
 
@@ -45,8 +47,9 @@ export async function POST(request: Request) {
   }
 
   const drafts = new FileDrafts(session.user.id);
-  const agent = createAgent(apiKey, session.user.id, drafts);
-  const historyTools = { ...agent.tools, ...legacyPresentationTools };
+  const model = createAgentModel(apiKey);
+  const registry = createToolRegistry(model, session.user.id, drafts, providerOptions);
+  const historyTools = { ...registry.tools, ...legacyPresentationTools };
   const result = await safeValidateUIMessages<ChatMessage>({
     messages, tools: historyTools, dataSchemas: fileDeliverySchemas,
   });
@@ -86,6 +89,8 @@ export async function POST(request: Request) {
   const uiStream = createUIMessageStream<ChatMessage>({
     onError,
     async execute({ writer }) {
+      const domains = await routeToolDomains(result.data, registry, model, providerOptions, signal);
+      const agent = createAgent(model, registry, domains);
       const stream = await agent.stream({ messages: modelMessages, abortSignal: signal });
       let finish: Extract<InferUIMessageChunk<ChatMessage>, { type: "finish" }> | undefined;
       let streamFailed = false;

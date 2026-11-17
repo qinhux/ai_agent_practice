@@ -3,7 +3,8 @@ import pptxgen from "pptxgenjs";
 import sharp, { type ResizeOptions, type Sharp } from "sharp";
 import { z } from "zod";
 import {
-  hexColor, luminance, savedPaletteSchema, themeFont, themeStyleSchema, type FontPair, type ThemeStyle,
+  backgroundModeSchema, contrastRatio, hexColor, legacyPaletteSchema, legacyStyleSchema,
+  themeFont, themeSpecSchema, upgradeLegacyTheme, type FontPair, type ThemeSpec,
 } from "./theme-generator";
 
 // 去掉字符串首尾的空白，要求至少有一个字符，并限制长度。正则会拒绝换行、制表符等字符，让每个字段以单行文本传给排版代码。
@@ -38,22 +39,17 @@ export const slideTextFields = {
   imageFocusPoints,
 };
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
+const slideFields = { title, backgroundMode: backgroundModeSchema.optional() };
 export const slideContentSchema = z.discriminatedUnion("layout", [
-  z.object({ layout: z.literal("cover"), title, subtitle: slideText(90).optional(), imageBrief }),
+  z.object({ layout: z.literal("cover"), ...slideFields, subtitle: slideText(90).optional(), imageBrief }),
   // 要点列表页。这一页有一个标题，正文在同一栏里逐条列出，每条前面有一个圆点 •
-  z.object({ layout: z.literal("bullets"), title, points, imageBrief }),
-  z.object({ layout: z.literal("two-columns"), title, left: column, right: column, imageBrief }),
-  z.object({ layout: z.literal("summary"), title, points, closing: z.boolean().optional().catch(undefined), imageBrief }),
-  z.object({ layout: z.literal("metrics"), title, metrics: z.array(metricSchema).min(1).max(3), imageBrief: z.null().optional() }),
-  z.object({ layout: z.literal("steps"), title, steps: z.array(stepSchema).min(3).max(5), imageBrief: z.null().optional() }),
-  z.object({ layout: z.literal("image-focus"), title, points: imageFocusPoints, imageBrief }),
+  z.object({ layout: z.literal("bullets"), ...slideFields, points, imageBrief }),
+  z.object({ layout: z.literal("two-columns"), ...slideFields, left: column, right: column, imageBrief }),
+  z.object({ layout: z.literal("summary"), ...slideFields, points, closing: z.boolean().optional().catch(undefined), imageBrief }),
+  z.object({ layout: z.literal("metrics"), ...slideFields, metrics: z.array(metricSchema).min(1).max(3), imageBrief: z.null().optional() }),
+  z.object({ layout: z.literal("steps"), ...slideFields, steps: z.array(stepSchema).min(3).max(5), imageBrief: z.null().optional() }),
+  z.object({ layout: z.literal("image-focus"), ...slideFields, points: imageFocusPoints, imageBrief }),
 ]);
-
-function contrastRatio(first: string, second: string) {
-  const a = luminance(first);
-  const b = luminance(second);
-  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-}
 
 export const textStyleSchema = z.strictObject({
   fontFace: slideText(100).optional(),
@@ -101,16 +97,12 @@ const addedElementSchema = z.discriminatedUnion("type", [
   addedImageDefinition.omit({ generatedImageId: true, box: true }).extend({ id: z.uuid() }),
 ]);
 export type AddedSlideElement = z.infer<typeof addedElementSchema>;
-export const presentationSchema = z.object({
-  title: slideText(60),
-  slides: z.array(slideContentSchema),
-  palette: savedPaletteSchema,
-  theme: themeStyleSchema.optional(),
-});
+export const presentationTitleSchema = slideText(60);
 
 export const maxSlideCount = 12;
 
-export const presentationSourceSchema = presentationSchema.extend({
+const presentationPagesSchema = z.object({
+  title: presentationTitleSchema,
   slides: z.array(slideContentSchema.and(z.object({
     slideId: z.uuid(),
     // Preserve the original position-dependent styling when an existing slide is reordered.
@@ -125,6 +117,17 @@ export const presentationSourceSchema = presentationSchema.extend({
     (slides) => new Set(slides.map((page) => page.slideId)).size === slides.length,
   ),
 });
+const themedPresentationSchema = presentationPagesSchema.extend({
+  theme: themeSpecSchema,
+  legacyLayout: z.literal(true).optional(),
+});
+export const presentationSourceSchema = z.union([
+  themedPresentationSchema,
+  presentationPagesSchema.extend({ palette: legacyPaletteSchema, theme: legacyStyleSchema })
+    .transform(({ palette, theme, ...source }) => ({
+      ...source, theme: upgradeLegacyTheme(palette, theme), legacyLayout: true as const,
+    })),
+]);
 export type PresentationSource = z.infer<typeof presentationSourceSchema>;
 export type PresentationSlide = PresentationSource["slides"][number];
 type SlideColors = { background: string; text: string; accent: string };
@@ -134,18 +137,19 @@ export function getSlideAppearance(page: PresentationSlide, index: number, slide
   const isCover = firstSlide && page.layout === "cover";
   const isClosing = index === slideCount - 1 && page.layout === "summary" &&
     page.closing === true && page.points.length === 1 && page.points[0].length <= 50;
-  return page.appearance ?? { firstSlide, darkBackground: slideCount > 1 && (isCover || isClosing) };
+  return {
+    firstSlide: page.appearance?.firstSlide ?? firstSlide,
+    darkBackground: page.backgroundMode === undefined
+      ? page.appearance?.darkBackground ?? (slideCount > 1 && (isCover || isClosing))
+      : page.backgroundMode === "dark",
+  };
 }
 
-export function getSlideColors({ slides, palette }: PresentationSource): SlideColors[] {
-  const { lightBackground, darkBackground, accent } = palette;
+export function getSlideColors({ slides, theme }: PresentationSource): SlideColors[] {
+  const { modes, accent } = theme.colors;
   return slides.map((page, index) => {
     const { darkBackground: useDarkBackground } = getSlideAppearance(page, index, slides.length);
-    return {
-      background: useDarkBackground ? darkBackground : lightBackground,
-      text: useDarkBackground ? lightBackground : darkBackground,
-      accent,
-    };
+    return { ...modes[useDarkBackground ? "dark" : "light"], accent };
   });
 }
 
@@ -157,6 +161,26 @@ export function isOnSlide({ x, y, w, h }: ElementBox) {
 }
 const firstSlideTextWidth = 6.2;
 const pageNumberBox = { x: slideSize.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
+
+type PresentationLayout = Pick<PresentationSource, "theme" | "legacyLayout">;
+
+export function getSlideGrid({ pageMargin, columnGap, columns }: ThemeSpec["grid"]) {
+  const margin = pageMargin / 72;
+  const gap = columnGap / 72;
+  const width = slideSize.w - 2 * margin;
+  const columnWidth = (width - (columns - 1) * gap) / columns;
+  return {
+    margin, gap, width,
+    column: (start: number, span: number) => ({
+      x: margin + start * (columnWidth + gap),
+      w: span * columnWidth + (span - 1) * gap,
+    }),
+  };
+}
+
+export function getSlideContentTop(theme: ThemeSpec) {
+  return 1.65 + theme.spacing.elementGap / 72;
+}
 
 export type ElementBox = z.infer<typeof elementBoxSchema>;
 export type PresentationImage = { slideId: string; bytes: Uint8Array<ArrayBuffer>; box: ElementBox; fallback: boolean };
@@ -210,11 +234,17 @@ function getSlideTextElements(
   page: PresentationSlide,
   colors: SlideColors,
   index: number,
-  imageBox?: ElementBox,
-  theme?: ThemeStyle,
+  imageBox: ElementBox | undefined,
+  { theme, legacyLayout }: PresentationLayout,
 ): SlideTextElement[] {
   const elements: SlideTextElement[] = [];
   const hasFirstSlideImage = (page.appearance?.firstSlide ?? index === 0) && Boolean(imageBox);
+  const grid = getSlideGrid(theme.grid);
+  const { coverTitleSize, titleSize, subtitleSize, bodySize } = theme.typography;
+  const margin = legacyLayout ? 0.85 : grid.margin;
+  const width = legacyLayout ? 11.6 : grid.width;
+  const firstTextWidth = legacyLayout ? firstSlideTextWidth : grid.column(0, 6).w;
+  const contentTop = legacyLayout ? 1.94 : getSlideContentTop(theme);
   function add(
     key: TextElementKey,
     text: string,
@@ -227,7 +257,7 @@ function getSlideTextElements(
     const font = resolveFont(override?.fontFace, theme, key === "title" ? "title" : "body");
     elements.push({
       key, text, box: page.textBoxes?.[key] ?? box,
-      style: { fontFace: "Arial", color: colors.text, ...style, ...override, ...(font && { fontFace: font.latin }) },
+      style: { color: colors.text, ...style, ...override, fontFace: font.latin },
       font,
       explicitFont: override?.fontFace,
       bullet,
@@ -235,89 +265,97 @@ function getSlideTextElements(
   }
 
   if (page.layout === "cover") {
-    const width = hasFirstSlideImage ? firstSlideTextWidth : imageBox ? 5.4 : 11.6;
+    const textWidth = hasFirstSlideImage ? firstTextWidth : imageBox ? (legacyLayout ? 5.4 : firstTextWidth) : width;
     add("title", page.title,
-      { x: 0.85, y: imageBox || page.subtitle ? 1.52 : 2.48, w: width, h: 2.55 },
-      { fontFace: "Georgia", bold: true, fontSize: 40 });
+      { x: margin, y: imageBox || page.subtitle ? 1.52 : 2.48, w: textWidth, h: 2.55 },
+      { bold: true, fontSize: coverTitleSize });
     if (page.subtitle) {
       add("subtitle", page.subtitle,
-        { x: 0.85, y: 4.23, w: width, h: 1.45 }, { fontSize: 20 });
+        { x: margin, y: 4.23, w: textWidth, h: 1.45 }, { fontSize: subtitleSize });
     }
     return elements;
   }
 
   add("title", page.title,
-    { x: 0.85, y: 0.5, w: hasFirstSlideImage && page.layout !== "image-focus" ? firstSlideTextWidth : 11.6, h: 1.15 },
-    { fontFace: "Georgia", bold: true, fontSize: 32 });
+    { x: margin, y: 0.5, w: hasFirstSlideImage && page.layout !== "image-focus" ? firstTextWidth : width, h: 1.15 },
+    { bold: true, fontSize: titleSize });
   const accentText = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
   if (page.layout === "metrics") {
     const count = page.metrics.length;
-    const gap = 0.5;
-    const width = (11.6 - gap * (count - 1)) / count;
+    const gap = legacyLayout ? 0.5 : grid.gap;
+    const metricWidth = (width - gap * (count - 1)) / count;
     page.metrics.forEach(({ value, label, detail }, index) => {
       const slot = (index + 1) as 1 | 2 | 3;
-      const x = 0.85 + index * (width + gap);
-      add(`metric${slot}Value`, value, { x, y: 2.1, w: width, h: 1.25 },
-        { fontSize: count === 1 ? 64 : 46, bold: true, color: accentText, align: "center" });
-      add(`metric${slot}Label`, label, { x, y: 3.5, w: width, h: 0.8 },
-        { fontSize: 22, bold: true, align: "center" });
-      add(`metric${slot}Detail`, detail, { x, y: 4.45, w: width, h: 1.55 },
-        { fontSize: 17, align: "center" });
+      const x = margin + index * (metricWidth + gap);
+      add(`metric${slot}Value`, value, { x, y: contentTop + 0.16, w: metricWidth, h: 1.25 },
+        { fontSize: titleSize + (count === 1 ? 32 : 14), bold: true, color: accentText, align: "center" });
+      add(`metric${slot}Label`, label, { x, y: contentTop + 1.56, w: metricWidth, h: 0.8 },
+        { fontSize: legacyLayout ? 22 : subtitleSize, bold: true, align: "center" });
+      add(`metric${slot}Detail`, detail, { x, y: contentTop + 2.51, w: metricWidth, h: 1.55 },
+        { fontSize: legacyLayout ? 17 : bodySize, align: "center" });
     });
   } else if (page.layout === "steps") {
-    const gap = 0.35;
-    const width = (11.6 - gap * (page.steps.length - 1)) / page.steps.length;
+    const gap = legacyLayout ? 0.35 : grid.gap;
+    const stepWidth = (width - gap * (page.steps.length - 1)) / page.steps.length;
     const markerWidth = 1.55;
     page.steps.forEach(({ marker, heading, detail }, index) => {
       const slot = (index + 1) as 1 | 2 | 3 | 4 | 5;
-      const x = 0.85 + index * (width + gap);
-      add(`step${slot}Marker`, marker ?? String(slot), { x: x + (width - markerWidth) / 2, y: 2.04, w: markerWidth, h: 0.65 },
-        { fontSize: 20, bold: true, color: accentText, align: "center" });
-      add(`step${slot}Heading`, heading, { x, y: 2.91, w: width, h: 0.88 },
-        { fontSize: 20, bold: true, align: "center" });
-      add(`step${slot}Detail`, detail, { x, y: 3.95, w: width, h: 1.75 }, { fontSize: 17, align: "center" });
+      const x = margin + index * (stepWidth + gap);
+      add(`step${slot}Marker`, marker ?? String(slot), { x: x + (stepWidth - markerWidth) / 2, y: contentTop + 0.1, w: markerWidth, h: 0.65 },
+        { fontSize: bodySize, bold: true, color: accentText, align: "center" });
+      add(`step${slot}Heading`, heading, { x, y: contentTop + 0.97, w: stepWidth, h: 0.88 },
+        { fontSize: legacyLayout ? 20 : subtitleSize, bold: true, align: "center" });
+      add(`step${slot}Detail`, detail, { x, y: contentTop + 2.01, w: stepWidth, h: 1.75 },
+        { fontSize: legacyLayout ? 17 : bodySize, align: "center" });
     });
   } else if (page.layout === "image-focus") {
+    const interpretation = legacyLayout ? { x: 9, w: 3.45 } : grid.column(8, 4);
     page.points.forEach((point, index) => {
       add(`point${(index + 1) as 1 | 2}`, point,
         imageBox
-          ? { x: 9, y: 2.12 + 1.9 * index, w: 3.45, h: 1.75 }
-          : { x: 0.85, y: 1.94 + 1.4 * index, w: 11.6, h: 1.27 },
-        { fontSize: 20 }, { indent: 19 });
+          ? { ...interpretation, y: contentTop + 0.18 + 1.9 * index, h: 1.75 }
+          : { x: margin, y: contentTop + 1.4 * index, w: width, h: 1.27 },
+        { fontSize: bodySize }, { indent: 19 });
     });
   } else if (page.layout === "two-columns") {
     const { fullSlide } = getSlideImageLayout(page, imageBox);
     const headingColor = fullSlide ? colors.text : accentText;
     const hasImageAboveColumns = imageBox && !hasFirstSlideImage;
-    const headingY = hasImageAboveColumns ? 4.11 : 1.94;
-    const pointSpacing = hasImageAboveColumns ? 0.76 : 1.24;
-    const columnGap = 0.4;
-    const columnWidth = hasFirstSlideImage ? (firstSlideTextWidth - columnGap) / 2 : 5.4;
-    const rightColumnX = hasFirstSlideImage ? 0.85 + columnWidth + columnGap : 7.0;
-    for (const [side, x] of [["left", 0.85], ["right", rightColumnX]] as const) {
+    const headingY = hasImageAboveColumns ? (legacyLayout ? 4.11 : contentTop + 2.22 + theme.spacing.elementGap / 72) : contentTop;
+    const pointSpacing = hasImageAboveColumns
+      ? (legacyLayout ? 0.76 : Math.min(0.76, (pageNumberBox.y - 0.1 - headingY - 0.62) / 3))
+      : 1.24;
+    const span = hasFirstSlideImage ? 3 : 6;
+    const legacyWidth = hasFirstSlideImage ? (firstSlideTextWidth - 0.4) / 2 : 5.4;
+    const columns = legacyLayout
+      ? [{ x: 0.85, w: legacyWidth }, { x: hasFirstSlideImage ? 0.85 + legacyWidth + 0.4 : 7, w: legacyWidth }]
+      : [grid.column(0, span), grid.column(span, span)];
+    for (const [columnIndex, side] of (["left", "right"] as const).entries()) {
       const column = page[side];
+      const track = columns[columnIndex];
       add(`${side}Heading`, column.heading,
-        { x, y: headingY, w: columnWidth, h: 0.55 },
-        { fontSize: 20, bold: true, color: headingColor });
+        { ...track, y: headingY, h: 0.55 },
+        { fontSize: legacyLayout ? 20 : subtitleSize, bold: true, color: headingColor });
       column.points.forEach((point, index) => {
         add(`${side}Point${index + 1}` as TextElementKey, point,
-          { x, y: headingY + 0.62 + pointSpacing * index, w: columnWidth, h: pointSpacing - 0.02 },
-          { fontSize: 17 }, { indent: 17 });
+          { ...track, y: headingY + 0.62 + pointSpacing * index, h: pointSpacing - 0.02 },
+          { fontSize: legacyLayout ? 17 : bodySize }, { indent: 17 });
       });
     }
   } else {
     page.points.forEach((point, index) => {
       add(`point${index + 1}` as TextElementKey, point,
-        { x: 0.85, y: 1.94 + 1.24 * index, w: imageBox ? firstSlideTextWidth : 11.6, h: 1.17 },
-        { fontSize: 20 }, { indent: 19 });
+        { x: margin, y: contentTop + 1.24 * index,
+          w: hasFirstSlideImage || (imageBox && legacyLayout) ? firstTextWidth : imageBox ? grid.column(0, 7).w : width, h: 1.17 },
+        { fontSize: bodySize }, { indent: 19 });
     });
   }
   return elements;
 }
 
-function resolveFont(explicit: string | undefined, theme: ThemeStyle | undefined, role: "title" | "body") {
+function resolveFont(explicit: string | undefined, theme: ThemeSpec, role: "title" | "body") {
   if (explicit) return { latin: explicit, eastAsian: explicit };
-  return theme ? themeFont(theme, role) : undefined;
+  return themeFont(theme, role);
 }
 
 type SlideElement =
@@ -330,11 +368,11 @@ export function getSlideElements(
   colors: SlideColors,
   index: number,
   images: ReadonlyMap<string, Pick<PresentationImage, "box">>,
-  theme?: ThemeStyle,
+  layout: PresentationLayout,
 ): SlideElement[] {
   const imageId = templateElementId(page.slideId, "image");
   const image = page.removedElementIds?.includes(imageId) ? undefined : images.get(imageId);
-  const elements: SlideElement[] = getSlideTextElements(page, colors, index, image?.box, theme)
+  const elements: SlideElement[] = getSlideTextElements(page, colors, index, image?.box, layout)
     .map(({ key, ...element }) => ({
       ...element, type: "text", id: templateElementId(page.slideId, key), templateKey: key,
     }));
@@ -346,10 +384,10 @@ export function getSlideElements(
   }
   for (const element of page.addedElements ?? []) {
     if (element.type === "text") {
-      const font = resolveFont(element.style?.fontFace, theme, "body");
+      const font = resolveFont(element.style?.fontFace, layout.theme, "body");
       elements.push({
         ...element, font, explicitFont: element.style?.fontFace,
-        style: { fontFace: font?.latin ?? "Arial", color: colors.text, fontSize: 20, ...element.style },
+        style: { fontFace: font.latin, color: colors.text, fontSize: layout.theme.typography.bodySize, ...element.style },
       });
     } else {
       const asset = images.get(element.id);
@@ -369,21 +407,28 @@ export function describeSlideElement(element: SlideElement) {
 }
 
 // DrawingML alpha represents opacity in thousandths of a percent.
-const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
-  '<a:gs pos="0"><a:srgbClr val="000000"><a:alpha val="70000"/></a:srgbClr></a:gs>' +
-  '<a:gs pos="100000"><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:gs>' +
-  '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
+function imageGradientFill(background: string, legacyLayout?: true) {
+  const color = legacyLayout ? "000000" : background;
+  const stop = (position: number, opacity: number) =>
+    `<a:gs pos="${position}"><a:srgbClr val="${color}"><a:alpha val="${opacity}"/></a:srgbClr></a:gs>`;
+  const stops = legacyLayout ? stop(0, 70000) : stop(0, 97000) + stop(47000, 94000);
+  return '<a:gradFill rotWithShape="1"><a:gsLst>' + stops + stop(100000, 0) +
+    '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
+}
+
+const pptxLayouts = { "16:9": "LAYOUT_WIDE" } as const;
 
 export async function renderPresentation(
   presentation: PresentationSource,
   slideColors: SlideColors[],
   images: ReadonlyMap<string, PresentationImage>,
 ) {
+  const { theme, legacyLayout } = presentation;
   const pptx = new pptxgen();
-  pptx.layout = "LAYOUT_WIDE";
+  pptx.layout = pptxLayouts[theme.aspectRatio];
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
-  const slidesWithGradient = new Set<string>();
+  const slidesWithGradient = new Map<string, string>();
   const customFonts = new Map<string, FontPair>();
 
   function customFontFace(font: FontPair) {
@@ -398,8 +443,9 @@ export async function renderPresentation(
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
     const colors = slideColors[index];
+    const imageBackground = legacyLayout ? theme.colors.modes.light.background : colors.background;
     slide.background = { color: colors.background };
-    const elements = getSlideElements(page, colors, index, images, presentation.theme);
+    const elements = getSlideElements(page, colors, index, images, presentation);
     const imageElements = elements.filter((element) => element.type === "image");
     for (const element of imageElements) {
       const image = images.get(element.id)!;
@@ -407,7 +453,7 @@ export async function renderPresentation(
       const bytes = fit
         ? await fitPresentationImage(sharp(image.bytes, { limitInputPixels: 16_000_000 }), image.box, {
           ...fit,
-          background: `#${presentation.palette.lightBackground}`,
+          background: `#${imageBackground}`,
         })
         : image.bytes;
       slide.addImage({
@@ -422,12 +468,22 @@ export async function renderPresentation(
           objectName: "渐变遮罩",
           line: { transparency: 100 },
         });
-        slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
+        slidesWithGradient.set(`ppt/slides/slide${index + 1}.xml`, imageGradientFill(colors.background, legacyLayout));
       }
     }
     if (page.layout === "steps") {
       const markers = elements.filter((element) => element.type === "text" && /^step\dMarker$/.test(element.templateKey ?? ""));
-      const color = contrastRatio(colors.accent, colors.background) >= 3 ? colors.accent : colors.text;
+      const { borderRadius, strokeWidth, strokeColorRole } = theme.shape;
+      const strokeColor = theme.colors[strokeColorRole];
+      const color = contrastRatio(strokeColor, colors.background) >= 3 ? strokeColor : colors.text;
+      const line = { color, width: strokeWidth };
+      if (!legacyLayout) {
+        for (const { box } of markers) {
+          slide.addShape(borderRadius ? pptx.ShapeType.roundRect : pptx.ShapeType.rect, {
+            ...box, objectName: "步骤标记边框", rectRadius: Math.min(borderRadius / 72, box.h / 2, box.w / 2), line,
+          });
+        }
+      }
       for (const [index, marker] of markers.slice(1).entries()) {
         const from = markers[index].box;
         const to = marker.box;
@@ -435,17 +491,18 @@ export async function renderPresentation(
         const y = from.y + from.h / 2;
         const w = to.x - x - 0.08;
         if (w <= 0 || Math.abs(y - to.y - to.h / 2) > 0.02) continue;
-        slide.addShape(pptx.ShapeType.line, { x, y, w, h: 0, line: { color, width: 1 } });
+        slide.addShape(pptx.ShapeType.line, { x, y, w, h: 0, line });
       }
     }
     const imageOverlapsPageNumber = imageElements.some(({ box }) =>
       box.x < pageNumberBox.x + pageNumberBox.w && box.x + box.w > pageNumberBox.x &&
       box.y < pageNumberBox.y + pageNumberBox.h && box.y + box.h > pageNumberBox.y);
+    const pageNumberColors = imageOverlapsPageNumber && legacyLayout ? theme.colors.modes.dark : colors;
     slide.addText(`${index + 1} / ${presentation.slides.length}`, {
       ...textOptions, ...pageNumberBox, objectName: "页码", align: "right", fontSize: 10, margin: [0, 5, 0, 5],
-      color: imageOverlapsPageNumber ? presentation.palette.lightBackground : colors.text,
-      fill: imageOverlapsPageNumber ? { color: presentation.palette.darkBackground } : undefined,
-      ...(presentation.theme && { fontFace: customFontFace(themeFont(presentation.theme, "body")) }),
+      color: pageNumberColors.text,
+      fill: imageOverlapsPageNumber ? { color: pageNumberColors.background } : undefined,
+      fontFace: customFontFace(themeFont(theme, "body")),
     });
 
     for (const element of elements) {
@@ -472,11 +529,12 @@ export async function renderPresentation(
         const font = customFonts.get(token);
         return font ? `<a:${script} typeface="${script === "ea" ? font.eastAsian : font.latin}"` : match;
       });
-    if (slidesWithGradient.has(part.name)) {
+    const gradient = slidesWithGradient.get(part.name);
+    if (gradient) {
       // PptxGenJS cannot set a gradient fill on a shape through its public API.
       const maskFill = /(<p:sp><p:nvSpPr><p:cNvPr id="\d+" name="渐变遮罩">[\s\S]*?<\/a:prstGeom>)<a:noFill\/>/;
       if (!maskFill.test(xml)) throw new Error("Missing PowerPoint gradient mask shape.");
-      xml = xml.replace(maskFill, (_, shape: string) => shape + imageGradientFill);
+      xml = xml.replace(maskFill, (_, shape: string) => shape + gradient);
     }
     archive.file(part.name, xml);
   }));

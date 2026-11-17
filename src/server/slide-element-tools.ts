@@ -45,7 +45,7 @@ export function createListSlideElementsTool(userId: string, drafts: Presentation
           [elementId, { box: elementBoxSchema.parse(box) }] as const));
         return {
           presentationId, slideNumber, slideSize,
-          elements: getSlideElements(page, getSlideColors(source)[index], index, images, source.theme).map(describeSlideElement),
+          elements: getSlideElements(page, getSlideColors(source)[index], index, images, source).map(describeSlideElement),
         };
       } catch (error) {
         abortSignal?.throwIfAborted();
@@ -71,7 +71,7 @@ export function createAddOrRemoveSlideElementsTool(userId: string, drafts: Prese
           if (!page) return { error: `这份 PPT 共有 ${source.slides.length} 页，请指定有效页码。` };
 
           const colors = getSlideColors(source)[index];
-          const elements = getSlideElements(page, colors, index, images, source.theme);
+          const elements = getSlideElements(page, colors, index, images, source);
           const byId = new Map(elements.map((element) => [element.id, element]));
           const removals = new Set(remove);
           if (removals.size !== remove.length) return { error: "待删除的元素 ID 有重复。" };

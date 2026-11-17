@@ -37,8 +37,8 @@ export async function generateSlides(
         }
       }),
   });
-  const pages = plan.slides.map(({ layout, goal, keyPoints, imageIntent }, index) =>
-    ({ slideNumber: index + 1, layout, goal, keyPoints, imageIntent }));
+  const pages = plan.slides.map(({ layout, goal, keyPoints, imageIntent, backgroundMode }, index) =>
+    ({ slideNumber: index + 1, layout, goal, keyPoints, imageIntent, backgroundMode }));
   const { slides } = await generatePresentationJson(options, "slide content", schema,
     `按照给定的 PowerPoint 大纲写出逐页内容。只返回 {"slides":[{"slideNumber":1,"content":{...}},...]}。按原顺序返回所有页，保留原页码和布局。
 content 使用以下结构：
@@ -57,5 +57,8 @@ image-focus 写 1–2 条解读，每条最多 72 字，围绕图中可示意的
 imageIntent 为 illustration 时，在 content 中用 imageBrief（最多 280 字）描述一张独立配图的主体和构图，可采用写实或插画风格。imageIntent 为 none 时省略 imageBrief。配图避免出现文字、幻灯片文案或图表，避免把生成的场景描述为实拍证据。
 所有文本使用单行纯文本。按需求指定的语言和主题风格写作，忠实使用提供的材料，保留用户指定的精确文案，避免编造统计数据、引文或来源。`,
     JSON.stringify({ brief, title: plan.title, pages, theme }), signal);
-  return slides.map(({ content }, index) => ({ ...content, slideId: plan.slides[index].slideId }));
+  return slides.map(({ content }, index) => {
+    const { slideId, backgroundMode } = plan.slides[index];
+    return { ...content, slideId, backgroundMode };
+  });
 }

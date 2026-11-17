@@ -155,6 +155,7 @@ export function createUpdateSlideElementsTool(
     execute: async ({ presentationId, slideNumbers, instructions }, { abortSignal }) => {
       try {
         return await drafts.edit(presentationId, abortSignal, async ({ source, images, stage }) => {
+          const { theme } = source;
           const prisma = getPrisma();
           if (slideNumbers?.some((number) => number > source.slides.length)) {
             return { error: `这份 PPT 共有 ${source.slides.length} 页，请指定有效页码。` };
@@ -163,7 +164,7 @@ export function createUpdateSlideElementsTool(
           const colors = getSlideColors(source);
           const targets = new Map(source.slides.flatMap((page, index) => {
             if (!allowed.has(index + 1)) return [];
-            const elements = getSlideElements(page, colors[index], index, images, source.theme);
+            const elements = getSlideElements(page, colors[index], index, images, source);
             return [[page.slideId, { index, elements }] as const];
           }));
           const slides = Array.from(targets, ([slideId, { index, elements }]) => ({
@@ -335,7 +336,7 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 if (generationSize) fit.position = "centre";
                 description = source.prompt;
                 bytes = new Uint8Array(await generateImageAsset(
-                  `${description}. No captions or presentation layout. ${composition}`,
+                  `${description}. 配图风格：${theme.imageStyle}。No captions or presentation layout. ${composition}`,
                   generationSize ?? fallbackRatio, imageSignal,
                 ));
               }

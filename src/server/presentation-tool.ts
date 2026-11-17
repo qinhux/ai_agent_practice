@@ -29,7 +29,7 @@ export function createPresentationTool(
         const request = { ...brief, slideCount };
         const { theme, plan } = await planPresentation(options, request, abortSignal);
         const slides = await generateSlides(options, request, plan, theme, abortSignal);
-        const source: PresentationSource = { title: plan.title, palette: theme.palette, theme: theme.style, slides };
+        const source: PresentationSource = { title: plan.title, theme, slides };
         const images = await preparePresentationImages(source, abortSignal);
         abortSignal?.throwIfAborted();
         return {

@@ -1,8 +1,8 @@
 import sharp from "sharp";
 import { generateImageAsset } from "./images";
 import {
-  fitPresentationImage, imagePixelSize, slideSize, templateElementId,
-  type PresentationImage, type PresentationSource,
+  fitPresentationImage, getSlideColors, getSlideContentTop, getSlideGrid, imagePixelSize, slideSize, templateElementId,
+  type ElementBox, type PresentationImage, type PresentationSlide, type PresentationSource,
 } from "./presentations";
 
 const fullSlideImageBox = { x: 0, y: 0, ...slideSize };
@@ -15,6 +15,24 @@ const imageBoxes = {
   "image-focus": { x: 0.85, y: 1.84, w: 7.72, h: 4.62 },
 } as const;
 
+function themedImageBox(
+  layout: Exclude<PresentationSlide["layout"], "metrics" | "steps">,
+  isFirstSlide: boolean,
+  theme: PresentationSource["theme"],
+): ElementBox {
+  const grid = getSlideGrid(theme.grid);
+  const y = getSlideContentTop(theme);
+  if (isFirstSlide) {
+    const { x } = grid.column(6, 6);
+    return { x, y: 0, w: slideSize.w - x, h: slideSize.h };
+  }
+  if (layout === "cover") return { ...grid.column(6, 6), y: 0.6, h: 6.3 };
+  if (layout === "two-columns") return { ...grid.column(0, 12), y, h: 2.22 };
+  if (layout === "image-focus") return { ...grid.column(0, 8), y, h: 4.62 };
+  const column = grid.column(7, 5);
+  return { ...column, y, h: Math.min(column.w, 4.9) };
+}
+
 async function fallbackImage(width: number, height: number, index: number) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 1000 1000" preserveAspectRatio="none">
     <rect width="1000" height="1000" fill="#F4F4F5"/>
@@ -26,10 +44,12 @@ async function fallbackImage(width: number, height: number, index: number) {
 }
 
 export async function preparePresentationImages(
-  { slides, theme, palette }: Pick<PresentationSource, "slides" | "theme" | "palette">,
+  presentation: PresentationSource,
   signal?: AbortSignal,
   slideIds?: ReadonlySet<string>,
 ) {
+  const { slides, theme, legacyLayout } = presentation;
+  const slideColors = getSlideColors(presentation);
   const images = new Map<string, PresentationImage>();
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
   let nextIndex = 0;
@@ -42,15 +62,16 @@ export async function preparePresentationImages(
 
       const imageFocus = page.layout === "image-focus";
       const isFirstSlide = !imageFocus && (page.appearance?.firstSlide ?? index === 0);
-      const sideOrContentBox = isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout];
+      const sideOrContentBox = legacyLayout
+        ? isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout]
+        : themedImageBox(page.layout, isFirstSlide, theme);
       if (configured) {
         try {
           const aspectRatio = isFirstSlide || imageFocus || page.layout === "two-columns" ? "16:9" : "1:1";
           const composition = isFirstSlide
             ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
             : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
-          const style = theme ? `配图风格：${theme.imageStyle}。` : "";
-          const prompt = `${page.imageBrief}. ${style}No text, captions, or presentation layout. ${composition}`;
+          const prompt = `${page.imageBrief}. 配图风格：${theme.imageStyle}。No text, captions, or presentation layout. ${composition}`;
           const image = await generateImageAsset(prompt, aspectRatio, signal);
           const source = sharp(image);
           let box = sideOrContentBox;
@@ -62,8 +83,8 @@ export async function preparePresentationImages(
           }
           const bytes = await fitPresentationImage(source, box, {
             fit: imageFocus ? "contain" : "cover",
-            position: isFirstSlide && box === firstSlideSideImageBox ? "right" : "centre",
-            ...(imageFocus && { background: `#${palette.lightBackground}` }),
+            position: isFirstSlide && box === sideOrContentBox ? "right" : "centre",
+            ...(imageFocus && { background: `#${legacyLayout ? theme.colors.modes.light.background : slideColors[index].background}` }),
           });
           images.set(templateElementId(page.slideId, "image"), { slideId: page.slideId, bytes, box, fallback: false });
           continue;

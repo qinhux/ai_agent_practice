@@ -168,7 +168,7 @@ export const presentationSourceSchema = z.union([
 ]);
 export type PresentationSource = z.infer<typeof presentationSourceSchema>;
 export type PresentationSlide = PresentationSource["slides"][number];
-type SlideColors = { background: string; text: string; accent: string };
+type SlideColors = { background: string; text: string; accentText: string };
 
 export function getSlideAppearance(page: PresentationSlide, index: number, slideCount: number) {
   const firstSlide = index === 0;
@@ -187,7 +187,8 @@ export function getSlideColors({ slides, theme }: PresentationSource): SlideColo
   const { modes, accent } = theme.colors;
   return slides.map((page, index) => {
     const { darkBackground: useDarkBackground } = getSlideAppearance(page, index, slides.length);
-    return { ...modes[useDarkBackground ? "dark" : "light"], accent };
+    const { background, text, accentText } = modes[useDarkBackground ? "dark" : "light"];
+    return { background, text, accentText: accentText ?? (contrastRatio(accent, background) >= 4.5 ? accent : text) };
   });
 }
 
@@ -338,7 +339,7 @@ function getSlideTextElements(
   add("title", page.title,
     { x: margin, y: 0.5, w: hasFirstSlideImage && page.layout !== "image-focus" ? firstTextWidth : width, h: 1.15 },
     { bold: true, fontSize: titleSize });
-  const accentText = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
+  const { accentText } = colors;
   if (page.layout === "image-comparison") {
     for (const [slot, key] of [["leftImage", "leftCaption"], ["rightImage", "rightCaption"]] as const) {
       const { x, y, w, h } = getComparisonImageBox(theme, slot);

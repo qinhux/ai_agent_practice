@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { generatePresentationJson, type PresentationModelOptions } from "./presentation-json";
 import { getSlideImageSlots, imageSlotSchema, presentationTitleSchema, slideContentSchema } from "./presentations";
-import { backgroundModeSchema, themeInstructions, themeSpecSchema } from "./theme-generator";
+import { backgroundModeSchema, generatedThemeSpecSchema, themeInstructions } from "./theme-generator";
 
 const slideLayoutIds = slideContentSchema.options.map(({ shape }) => shape.layout.value);
 const slideLayoutCatalog = {
@@ -92,7 +92,7 @@ export async function planPresentation(
   signal: AbortSignal | undefined,
 ) {
   const schema = z.object({
-    theme: themeSpecSchema,
+    theme: generatedThemeSpecSchema,
     plan: z.object({
       title: presentationTitleSchema,
       slides: z.array(plannedSlideSchema).length(brief.slideCount)

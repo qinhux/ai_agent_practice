@@ -19,9 +19,12 @@ export const hexColor = z.string().trim().regex(/^#?[0-9a-fA-F]{6}$/)
 
 export const backgroundModeSchema = z.enum(["light", "dark"]);
 const colorRoleSchema = z.enum(["primary", "secondary", "accent"]);
-const modeColorsSchema = z.object({ background: hexColor, text: hexColor }).refine(
+const modeColorsSchema = z.object({ background: hexColor, text: hexColor, accentText: hexColor.optional() }).refine(
   ({ background, text }) => contrastRatio(background, text) >= 4.5,
-  "背景和文字的对比度必须至少为 4.5:1。",
+  { path: ["text"], message: "背景和文字的对比度必须至少为 4.5:1。" },
+).refine(
+  ({ background, accentText }) => accentText === undefined || contrastRatio(background, accentText) >= 4.5,
+  { path: ["accentText"], message: "背景和强调文字的对比度必须至少为 4.5:1。" },
 );
 const modesSchema = z.object({ light: modeColorsSchema, dark: modeColorsSchema }).refine(
   ({ light, dark }) => luminance(light.background) >= 0.65 && luminance(dark.background) <= 0.18,
@@ -66,6 +69,11 @@ export const themeSpecSchema = z.object({
   imageStyle: visualDescription,
 });
 export type ThemeSpec = z.infer<typeof themeSpecSchema>;
+
+export const generatedThemeSpecSchema = themeSpecSchema.refine(
+  ({ colors: { modes } }) => modes.light.accentText !== undefined && modes.dark.accentText !== undefined,
+  { path: ["colors", "modes"], message: "浅色和深色模式都必须提供 accentText。" },
+);
 
 export function themeFont(theme: ThemeSpec, role: "title" | "body"): FontPair {
   const { fontFamily, titleFontFamily } = theme.typography;
@@ -114,7 +122,7 @@ export function upgradeLegacyTheme(
 }
 
 export const themeInstructions = `整份演示文稿使用同一个 theme。结构示例：
-{"themeId":"modern-city","aspectRatio":"16:9","colors":{"primary":"#17324D","secondary":"#277DA8","accent":"#E5A64B","modes":{"light":{"background":"#F3F6F8","text":"#17324D"},"dark":{"background":"#17324D","text":"#F3F6F8"}}},"typography":{"fontFamily":{"latin":"Arial","eastAsian":"Microsoft YaHei"},"coverTitleSize":40,"titleSize":32,"subtitleSize":22,"bodySize":18},"grid":{"columns":12,"pageMargin":40,"columnGap":20},"spacing":{"elementGap":20},"shape":{"borderRadius":8,"strokeWidth":1,"strokeColorRole":"secondary"},"visualStyle":"现代城市风格","imageStyle":"自然光、写实摄影"}
-根据主题和受众选择品牌色，优先尊重用户指定的颜色。colors 使用六位 RGB，light 使用浅色背景，dark 使用深色背景，每种模式背景与文字的对比度至少 4.5:1。themeId 使用小写字母、数字和连字符。
+{"themeId":"modern-city","aspectRatio":"16:9","colors":{"primary":"#17324D","secondary":"#277DA8","accent":"#E5A64B","modes":{"light":{"background":"#F3F6F8","text":"#17324D","accentText":"#8A5314"},"dark":{"background":"#17324D","text":"#F3F6F8","accentText":"#E5A64B"}}},"typography":{"fontFamily":{"latin":"Arial","eastAsian":"Microsoft YaHei"},"coverTitleSize":40,"titleSize":32,"subtitleSize":22,"bodySize":18},"grid":{"columns":12,"pageMargin":40,"columnGap":20},"spacing":{"elementGap":20},"shape":{"borderRadius":8,"strokeWidth":1,"strokeColorRole":"secondary"},"visualStyle":"现代城市风格","imageStyle":"自然光、写实摄影"}
+根据主题和受众选择品牌色，优先尊重用户指定的颜色。colors 使用六位 RGB，light 使用浅色背景，dark 使用深色背景。两种模式都要填写 accentText，用于强调文字。从品牌强调色 accent 选取适合该背景的色调，浅底可用较深色调，深底可用较亮色调，并与普通文字色有明显区别。每种模式的 text 和 accentText 与各自背景的对比度都至少为 4.5:1。themeId 使用小写字母、数字和连字符。
 页面比例固定 16:9，网格固定为 12 列，pageMargin 是左右页边距。除非需求明确需要调整，沿用示例中的字号和尺寸，单位为 pt。字体默认 Arial / Microsoft YaHei；经典风格可增加 titleFontFamily，使用 Georgia / Songti SC。shape.strokeColorRole 可用 primary、secondary 或 accent。
 visualStyle 和 imageStyle 各最多 120 字。未指定配图风格时优先自然光、真实质感的写实摄影风格。`;

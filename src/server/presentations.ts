@@ -25,6 +25,10 @@ const points = slidePoints(4, 90);
 const column = z.object({ heading: slideText(26), points: slidePoints(3, 60) });
 export const imageDescriptionSchema = slideText(280);
 const imageBrief = imageDescriptionSchema.nullish();
+export const imageSlotSchema = z.enum(["image", "leftImage", "rightImage"]);
+export type ImageSlot = z.infer<typeof imageSlotSchema>;
+const imageBriefs = z.partialRecord(imageSlotSchema, imageDescriptionSchema).optional();
+const imageCaption = slideText(80);
 const metricSchema = z.object({ value: slideText(14), label: slideText(20), detail: slideText(60) });
 const stepSchema = z.object({ marker: slideText(12).optional(), heading: slideText(14), detail: slideText(42) });
 const imageFocusPoints = z.array(slideText(72)).min(1).max(2);
@@ -37,10 +41,11 @@ export const slideTextFields = {
   metric: metricSchema.shape,
   step: stepSchema.shape,
   imageFocusPoints,
+  imageCaption,
 };
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
-const slideFields = { title, backgroundMode: backgroundModeSchema.optional() };
-export const slideContentSchema = z.discriminatedUnion("layout", [
+const slideFields = { title, backgroundMode: backgroundModeSchema.optional(), imageBriefs };
+const slideLayoutSchema = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("cover"), ...slideFields, subtitle: slideText(90).optional(), imageBrief }),
   // 要点列表页。这一页有一个标题，正文在同一栏里逐条列出，每条前面有一个圆点 •
   z.object({ layout: z.literal("bullets"), ...slideFields, points, imageBrief }),
@@ -49,7 +54,37 @@ export const slideContentSchema = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("metrics"), ...slideFields, metrics: z.array(metricSchema).min(1).max(3), imageBrief: z.null().optional() }),
   z.object({ layout: z.literal("steps"), ...slideFields, steps: z.array(stepSchema).min(3).max(5), imageBrief: z.null().optional() }),
   z.object({ layout: z.literal("image-focus"), ...slideFields, points: imageFocusPoints, imageBrief }),
+  z.object({ layout: z.literal("image-comparison"), ...slideFields, leftCaption: imageCaption, rightCaption: imageCaption }),
 ]);
+
+type ImageSlotSpec = { id: ImageSlot; required: boolean; fit: "cover" | "contain" };
+const optionalImage = [{ id: "image", required: false, fit: "cover" }] as const;
+const slideImageSlots = {
+  cover: optionalImage,
+  bullets: optionalImage,
+  "two-columns": optionalImage,
+  summary: optionalImage,
+  metrics: [],
+  steps: [],
+  "image-focus": [{ id: "image", required: true, fit: "contain" }],
+  "image-comparison": [
+    { id: "leftImage", required: true, fit: "cover" },
+    { id: "rightImage", required: true, fit: "cover" },
+  ],
+} satisfies Record<z.infer<typeof slideLayoutSchema>["layout"], readonly ImageSlotSpec[]>;
+
+export function getSlideImageSlots(layout: keyof typeof slideImageSlots): readonly ImageSlotSpec[] {
+  return slideImageSlots[layout];
+}
+
+export const slideContentSchema = slideLayoutSchema.refine(
+  (page) => Object.keys(page.imageBriefs ?? {}).every((id) => getSlideImageSlots(page.layout).some((slot) => slot.id === id)),
+  { path: ["imageBriefs"], message: "配图描述包含该版式不支持的槽位。" },
+);
+
+export function getSlideImageBrief(page: z.infer<typeof slideContentSchema>, slot: ImageSlot) {
+  return page.imageBriefs?.[slot] ?? (slot === "image" && "imageBrief" in page ? page.imageBrief : undefined);
+}
 
 export const textStyleSchema = z.strictObject({
   fontFace: slideText(100).optional(),
@@ -63,6 +98,7 @@ export const textElementKeySchema = z.enum([
   "title", "subtitle", "point1", "point2", "point3", "point4",
   "leftHeading", "leftPoint1", "leftPoint2", "leftPoint3",
   "rightHeading", "rightPoint1", "rightPoint2", "rightPoint3",
+  "leftCaption", "rightCaption",
   ...([1, 2, 3] as const).flatMap((slot) => [`metric${slot}Value`, `metric${slot}Label`, `metric${slot}Detail`] as const),
   ...([1, 2, 3, 4, 5] as const).flatMap((slot) => [`step${slot}Marker`, `step${slot}Heading`, `step${slot}Detail`] as const),
 ]);
@@ -72,6 +108,7 @@ export const elementBoxSchema = z.strictObject({
 });
 export const imageFitSchema = z.enum(["cover", "contain"]);
 const imagePositionSchema = z.enum(["centre", "right"]);
+const imageFitOverrideSchema = z.object({ fit: imageFitSchema, position: imagePositionSchema });
 const imageLayoutSchema = z.object({ fullSlide: z.boolean(), gradient: z.boolean() });
 export const slideNumberSchema = z.number().int().positive();
 export const elementIdSchema = z.string().min(1).max(64);
@@ -110,7 +147,8 @@ const presentationPagesSchema = z.object({
     textStyles: z.partialRecord(textElementKeySchema, textStyleSchema).optional(),
     textBoxes: z.partialRecord(textElementKeySchema, elementBoxSchema).optional(),
     imageLayout: imageLayoutSchema.optional(),
-    imageFit: z.object({ fit: imageFitSchema, position: imagePositionSchema }).optional(),
+    imageFit: imageFitOverrideSchema.optional(),
+    imageSlotFits: z.partialRecord(imageSlotSchema.exclude(["image"]), imageFitOverrideSchema).optional(),
     addedElements: z.array(addedElementSchema).optional(),
     removedElementIds: z.array(elementIdSchema).optional(),
   }))).min(1).refine(
@@ -185,8 +223,28 @@ export function getSlideContentTop(theme: ThemeSpec) {
 export type ElementBox = z.infer<typeof elementBoxSchema>;
 export type PresentationImage = { slideId: string; bytes: Uint8Array<ArrayBuffer>; box: ElementBox; fallback: boolean };
 
-export function templateElementId(slideId: string, key: TextElementKey | "image") {
+export function templateElementId(slideId: string, key: TextElementKey | ImageSlot) {
   return `${slideId}:${key}`;
+}
+
+export function getSlideImageFit(page: PresentationSlide, slot: ImageSlot) {
+  return slot === "image" ? page.imageFit : page.imageSlotFits?.[slot];
+}
+
+export function setSlideImageBrief(page: PresentationSlide, slot: ImageSlot, description?: string): PresentationSlide {
+  if (slot === "image" && !page.imageBriefs && "imageBrief" in page && page.layout !== "metrics" && page.layout !== "steps") {
+    return { ...page, imageBrief: description };
+  }
+  const imageBriefs = { ...page.imageBriefs };
+  if (description === undefined) delete imageBriefs[slot];
+  else imageBriefs[slot] = description;
+  const updated = { ...page, imageBriefs };
+  if (slot === "image" && "imageBrief" in updated) delete updated.imageBrief;
+  return updated;
+}
+
+export function getComparisonImageBox(theme: ThemeSpec, slot: Exclude<ImageSlot, "image">): ElementBox {
+  return { ...getSlideGrid(theme.grid).column(slot === "leftImage" ? 0 : 6, 6), y: getSlideContentTop(theme), h: 3.4 };
 }
 
 export function getSlideImageLayout(page: PresentationSlide, box?: ElementBox) {
@@ -236,6 +294,7 @@ function getSlideTextElements(
   index: number,
   imageBox: ElementBox | undefined,
   { theme, legacyLayout }: PresentationLayout,
+  hasComparisonImage: boolean,
 ): SlideTextElement[] {
   const elements: SlideTextElement[] = [];
   const hasFirstSlideImage = (page.appearance?.firstSlide ?? index === 0) && Boolean(imageBox);
@@ -280,7 +339,13 @@ function getSlideTextElements(
     { x: margin, y: 0.5, w: hasFirstSlideImage && page.layout !== "image-focus" ? firstTextWidth : width, h: 1.15 },
     { bold: true, fontSize: titleSize });
   const accentText = contrastRatio(colors.accent, colors.background) >= 4.5 ? colors.accent : colors.text;
-  if (page.layout === "metrics") {
+  if (page.layout === "image-comparison") {
+    for (const [slot, key] of [["leftImage", "leftCaption"], ["rightImage", "rightCaption"]] as const) {
+      const { x, y, w, h } = getComparisonImageBox(theme, slot);
+      add(key, page[key], { x, y: hasComparisonImage ? y + h + theme.spacing.elementGap / 72 : y, w, h: 0.85 },
+        { fontSize: subtitleSize, bold: true, align: "center" });
+    }
+  } else if (page.layout === "metrics") {
     const count = page.metrics.length;
     const gap = legacyLayout ? 0.5 : grid.gap;
     const metricWidth = (width - gap * (count - 1)) / count;
@@ -361,7 +426,7 @@ function resolveFont(explicit: string | undefined, theme: ThemeSpec, role: "titl
 type SlideElement =
   | ({ type: "text"; id: string; templateKey?: TextElementKey }
     & Omit<SlideTextElement, "key">)
-  | { type: "image"; id: string; templateKey?: "image"; box: ElementBox; description?: string; fit: "cover" | "contain" };
+  | { type: "image"; id: string; templateKey?: ImageSlot; box: ElementBox; description?: string; fit: "cover" | "contain" };
 
 export function getSlideElements(
   page: PresentationSlide,
@@ -370,17 +435,21 @@ export function getSlideElements(
   images: ReadonlyMap<string, Pick<PresentationImage, "box">>,
   layout: PresentationLayout,
 ): SlideElement[] {
-  const imageId = templateElementId(page.slideId, "image");
-  const image = page.removedElementIds?.includes(imageId) ? undefined : images.get(imageId);
-  const elements: SlideElement[] = getSlideTextElements(page, colors, index, image?.box, layout)
-    .map(({ key, ...element }) => ({
-      ...element, type: "text", id: templateElementId(page.slideId, key), templateKey: key,
-    }));
-  if (image) {
-    elements.unshift({
-      type: "image", id: imageId, templateKey: "image", box: image.box,
-      description: page.imageBrief ?? undefined, fit: page.imageFit?.fit ?? (page.layout === "image-focus" ? "contain" : "cover"),
+  const elements: SlideElement[] = [];
+  let primaryImageBox: ElementBox | undefined;
+  for (const slot of getSlideImageSlots(page.layout)) {
+    const id = templateElementId(page.slideId, slot.id);
+    const asset = page.removedElementIds?.includes(id) ? undefined : images.get(id);
+    if (!asset) continue;
+    if (slot.id === "image") primaryImageBox = asset.box;
+    elements.push({
+      type: "image", id, templateKey: slot.id, box: asset.box,
+      description: getSlideImageBrief(page, slot.id) ?? undefined, fit: getSlideImageFit(page, slot.id)?.fit ?? slot.fit,
     });
+  }
+  const hasComparisonImage = page.layout === "image-comparison" && elements.length > 0;
+  for (const { key, ...element } of getSlideTextElements(page, colors, index, primaryImageBox, layout, hasComparisonImage)) {
+    elements.push({ ...element, type: "text", id: templateElementId(page.slideId, key), templateKey: key });
   }
   for (const element of page.addedElements ?? []) {
     if (element.type === "text") {
@@ -449,7 +518,7 @@ export async function renderPresentation(
     const imageElements = elements.filter((element) => element.type === "image");
     for (const element of imageElements) {
       const image = images.get(element.id)!;
-      const fit = element.templateKey ? page.imageFit : { fit: element.fit, position: "centre" as const };
+      const fit = element.templateKey ? getSlideImageFit(page, element.templateKey) : { fit: element.fit, position: "centre" as const };
       const bytes = fit
         ? await fitPresentationImage(sharp(image.bytes, { limitInputPixels: 16_000_000 }), image.box, {
           ...fit,
@@ -462,7 +531,7 @@ export async function renderPresentation(
         ...image.box,
         altText: image.fallback ? "装饰插图" : element.description,
       });
-      if (element.templateKey && getSlideImageLayout(page, image.box).gradient) {
+      if (element.templateKey === "image" && getSlideImageLayout(page, image.box).gradient) {
         slide.addShape(pptx.ShapeType.rect, {
           ...image.box,
           objectName: "渐变遮罩",

@@ -1,22 +1,23 @@
 import sharp from "sharp";
 import { generateImageAsset } from "./images";
 import {
-  fitPresentationImage, getSlideColors, getSlideContentTop, getSlideGrid, imagePixelSize, slideSize, templateElementId,
+  fitPresentationImage, getComparisonImageBox, getSlideColors, getSlideContentTop, getSlideGrid, getSlideImageBrief,
+  getSlideImageSlots, imagePixelSize, slideSize, templateElementId,
   type ElementBox, type PresentationImage, type PresentationSlide, type PresentationSource,
 } from "./presentations";
 
 const fullSlideImageBox = { x: 0, y: 0, ...slideSize };
 const firstSlideSideImageBox = { x: 7.5, y: 0, w: slideSize.w - 7.5, h: slideSize.h };
-const imageBoxes = {
+const imageBoxes: Partial<Record<PresentationSlide["layout"], ElementBox>> = {
   cover: { x: 6.66, y: 0.6, w: 5.82, h: 6.3 },
   bullets: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
   "two-columns": { x: 0.85, y: 1.73, w: 11.63, h: 2.22 },
   summary: { x: 7.58, y: 1.94, w: 4.9, h: 4.9 },
   "image-focus": { x: 0.85, y: 1.84, w: 7.72, h: 4.62 },
-} as const;
+};
 
 function themedImageBox(
-  layout: Exclude<PresentationSlide["layout"], "metrics" | "steps">,
+  layout: PresentationSlide["layout"],
   isFirstSlide: boolean,
   theme: PresentationSource["theme"],
 ): ElementBox {
@@ -51,27 +52,35 @@ export async function preparePresentationImages(
   const { slides, theme, legacyLayout } = presentation;
   const slideColors = getSlideColors(presentation);
   const images = new Map<string, PresentationImage>();
+  const jobs = slides.flatMap((page, index) => {
+    if (slideIds && !slideIds.has(page.slideId)) return [];
+    return getSlideImageSlots(page.layout).flatMap((slot) => {
+      const brief = getSlideImageBrief(page, slot.id);
+      const elementId = templateElementId(page.slideId, slot.id);
+      return brief && !page.removedElementIds?.includes(elementId) ? [{ page, index, slot, brief, elementId }] : [];
+    });
+  });
   const configured = Boolean(process.env.DASHSCOPE_API_KEY?.trim() && process.env.DASHSCOPE_BASE_URL?.trim());
   let nextIndex = 0;
   async function worker() {
-    while (nextIndex < slides.length) {
+    while (nextIndex < jobs.length) {
       signal?.throwIfAborted();
-      const index = nextIndex++;
-      const page = slides[index];
-      if (!page.imageBrief || (slideIds && !slideIds.has(page.slideId))) continue;
+      const { page, index, slot, brief, elementId } = jobs[nextIndex++];
 
       const imageFocus = page.layout === "image-focus";
-      const isFirstSlide = !imageFocus && (page.appearance?.firstSlide ?? index === 0);
-      const sideOrContentBox = legacyLayout
-        ? isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout]
-        : themedImageBox(page.layout, isFirstSlide, theme);
+      const isComparison = slot.id !== "image";
+      const isFirstSlide = !isComparison && !imageFocus && (page.appearance?.firstSlide ?? index === 0);
+      const legacyBox = legacyLayout ? (isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout]) : undefined;
+      const sideOrContentBox = slot.id === "image"
+        ? legacyBox ?? themedImageBox(page.layout, isFirstSlide, theme)
+        : getComparisonImageBox(theme, slot.id);
       if (configured) {
         try {
-          const aspectRatio = isFirstSlide || imageFocus || page.layout === "two-columns" ? "16:9" : "1:1";
+          const aspectRatio = isFirstSlide || imageFocus || isComparison || page.layout === "two-columns" ? "16:9" : "1:1";
           const composition = isFirstSlide
             ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
             : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
-          const prompt = `${page.imageBrief}. 配图风格：${theme.imageStyle}。No text, captions, or presentation layout. ${composition}`;
+          const prompt = `${brief}. 配图风格：${theme.imageStyle}。No text, captions, or presentation layout. ${composition}`;
           const image = await generateImageAsset(prompt, aspectRatio, signal);
           const source = sharp(image);
           let box = sideOrContentBox;
@@ -82,26 +91,26 @@ export async function preparePresentationImages(
             if (Math.abs(width / height / slideAspect - 1) <= 0.02) box = fullSlideImageBox;
           }
           const bytes = await fitPresentationImage(source, box, {
-            fit: imageFocus ? "contain" : "cover",
+            fit: slot.fit,
             position: isFirstSlide && box === sideOrContentBox ? "right" : "centre",
             ...(imageFocus && { background: `#${legacyLayout ? theme.colors.modes.light.background : slideColors[index].background}` }),
           });
-          images.set(templateElementId(page.slideId, "image"), { slideId: page.slideId, bytes, box, fallback: false });
+          images.set(elementId, { slideId: page.slideId, bytes, box, fallback: false });
           continue;
         } catch (error) {
           signal?.throwIfAborted();
           console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
         }
       }
-      if (imageFocus) continue;
+      if (slot.required) continue;
       const { width, height } = imagePixelSize(sideOrContentBox);
       const bytes = await fallbackImage(width, height, index);
-      images.set(templateElementId(page.slideId, "image"), {
+      images.set(elementId, {
         slideId: page.slideId, bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true,
       });
     }
   }
-  await Promise.all(Array.from({ length: Math.min(3, slides.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, worker));
   signal?.throwIfAborted();
   return images;
 }

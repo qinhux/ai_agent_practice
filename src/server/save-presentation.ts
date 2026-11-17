@@ -4,6 +4,8 @@ import type { FileDeliveryData } from "@/lib/file-delivery";
 import {
   elementBoxSchema,
   getSlideColors,
+  getSlideImageBrief,
+  getSlideImageSlots,
   presentationSourceSchema,
   renderPresentation,
   templateElementId,
@@ -54,9 +56,16 @@ export async function preparePresentationDrafts(
   for (const { source, images, parentId, warnings } of drafts) {
     abortSignal.throwIfAborted();
     const bytes = await renderPresentation(source, getSlideColors(source), images);
-    const missingImagePages = source.slides.flatMap((page, index) =>
-      page.layout === "image-focus" && page.imageBrief && !images.has(templateElementId(page.slideId, "image"))
-        ? [index + 1] : []);
+    const missingImageWarnings = source.slides.flatMap((page, index) => {
+      const missingSlots = getSlideImageSlots(page.layout).filter(({ id }) => {
+        const elementId = templateElementId(page.slideId, id);
+        return getSlideImageBrief(page, id) && !page.removedElementIds?.includes(elementId) && !images.has(elementId);
+      });
+      if (!missingSlots.length) return [];
+      if (page.layout === "image-focus") return [`第 ${index + 1} 页的配图未能生成，已使用纯文字布局`];
+      const slotLabels = { image: "主图", leftImage: "左图", rightImage: "右图" };
+      return [`第 ${index + 1} 页的${missingSlots.map(({ id }) => slotLabels[id]).join("、")}未能生成`];
+    });
     prepared.push({
       data: {
         userId, parentId, title: source.title, bytes, source,
@@ -64,9 +73,7 @@ export async function preparePresentationDrafts(
       },
       slideCount: source.slides.length,
       fallbackImageCount: new Set([...images.values()].filter((image) => image.fallback).map((image) => image.slideId)).size,
-      warnings: missingImagePages.length
-        ? [`第 ${missingImagePages.join("、")} 页的配图未能生成，已使用纯文字布局`, ...warnings]
-        : warnings,
+      warnings: [...missingImageWarnings, ...warnings],
     });
   }
   return async (transaction: Prisma.TransactionClient) => {

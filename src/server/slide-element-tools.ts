@@ -10,6 +10,7 @@ import {
   getSlideElements,
   imagePixelSize,
   isOnSlide,
+  setSlideImageBrief,
   slideElementDefinitionSchema,
   slideNumberSchema,
   slideSize,
@@ -99,7 +100,7 @@ export function createAddOrRemoveSlideElementsTool(userId: string, drafts: Prese
           }
           abortSignal?.throwIfAborted();
 
-          const revised = { ...page };
+          let revised = { ...page };
           const removedTemplateIds = [...(page.removedElementIds ?? [])];
           for (const id of removals) {
             const element = byId.get(id)!;
@@ -107,9 +108,14 @@ export function createAddOrRemoveSlideElementsTool(userId: string, drafts: Prese
             if (element.type !== "image") continue;
             images.delete(id);
             if (element.templateKey) {
-              delete revised.imageBrief;
-              delete revised.imageLayout;
-              delete revised.imageFit;
+              revised = setSlideImageBrief(revised, element.templateKey);
+              if (element.templateKey === "image") {
+                delete revised.imageLayout;
+                delete revised.imageFit;
+              } else if (revised.imageSlotFits) {
+                revised.imageSlotFits = { ...revised.imageSlotFits };
+                delete revised.imageSlotFits[element.templateKey];
+              }
               // Keep the surviving template text in place when its layout image disappears.
               revised.textBoxes = { ...page.textBoxes };
               for (const text of elements) {

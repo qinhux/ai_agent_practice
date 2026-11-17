@@ -6,6 +6,8 @@ import { getPrisma } from "./db";
 import type { PresentationDrafts } from "./presentation-drafts";
 import {
   getSlideAppearance,
+  getSlideImageBrief,
+  getSlideImageSlots,
   maxSlideCount,
   slideContentSchema,
   slideNumberSchema,
@@ -32,8 +34,8 @@ const operationSchema = z.discriminatedUnion("op", [
     op: z.literal("add"),
     position: positionSchema,
     slides: z.array(slideContentSchema.refine(
-      (page) => page.layout !== "image-focus" || Boolean(page.imageBrief),
-      { path: ["imageBrief"], message: "新增图文解读页需要提供配图描述。" },
+      (page) => getSlideImageSlots(page.layout).every(({ id, required }) => !required || Boolean(getSlideImageBrief(page, id))),
+      { path: ["imageBriefs"], message: "为该版式的每个必填槽位提供配图描述。" },
     )).min(1).max(maxSlideCount),
   }),
   z.strictObject({ op: z.literal("remove"), targets: z.array(slideReferenceSchema).min(1).max(maxSlideCount) }),
@@ -71,7 +73,7 @@ function slideDirectory(slides: readonly PresentationSlide[]) {
 
 export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: PresentationDrafts) {
   return tool({
-    description: "List whole slides or stage an ordered batch that adds, removes, and/or moves whole slides in a PowerPoint draft. List first to resolve the user's original page numbers or titles to stable slide IDs. New metrics slides use 1–3 sourced values with units, steps use 3–5 ordered nodes, and image-focus uses an imageBrief for an AI illustration and 1–2 observations. Use currentSlideNumber only when the user explicitly refers to the order after earlier operations. All references within one operation are resolved before that operation changes the order.",
+    description: "List whole slides or stage an ordered batch that adds, removes, and/or moves whole slides in a PowerPoint draft. List first to resolve the user's original page numbers or titles to stable slide IDs. New metrics slides use 1–3 sourced values with units, steps use 3–5 ordered nodes, image-focus uses imageBriefs.image for an AI illustration and 1–2 observations, and image-comparison uses leftCaption, rightCaption and both imageBriefs.leftImage and imageBriefs.rightImage. Use currentSlideNumber only when the user explicitly refers to the order after earlier operations. All references within one operation are resolved before that operation changes the order.",
     inputSchema: slideOperationsInputSchema,
     execute: async (input, { abortSignal }) => {
       const { presentationId } = input;

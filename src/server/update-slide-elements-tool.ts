@@ -11,16 +11,19 @@ import {
   elementIdSchema,
   getSlideColors,
   getSlideElements,
+  getSlideImageFit,
   getSlideImageLayout,
   imageDescriptionSchema,
   imageFitSchema,
   imageNeedsUpscaling,
   imagePixelSize,
   isOnSlide,
+  setSlideImageBrief,
   slideNumberSchema,
   slideTextFields,
   textStyleSchema,
   type ElementBox,
+  type ImageSlot,
   type PresentationImage,
   type PresentationSlide,
   type TextElementKey,
@@ -65,6 +68,7 @@ type ImageEdit = z.infer<typeof imageEditSchema>;
 type ImageChange = {
   index: number;
   elementId: string;
+  slot?: ImageSlot;
   box: ElementBox;
   source?: ImageEdit["source"];
   fit: NonNullable<PresentationSlide["imageFit"]>;
@@ -108,6 +112,12 @@ function patchText(page: PresentationSlide, key: TextElementKey, value: string):
       ...page,
       [side]: { ...column, points: column.points.map((point, index) => index === position ? parsed.data : point) },
     };
+  }
+
+  if (page.layout === "image-comparison" && (key === "leftCaption" || key === "rightCaption")) {
+    const parsed = slideTextFields.imageCaption.safeParse(value);
+    if (parsed.success) return { ...page, [key]: parsed.data };
+    return;
   }
 
   if (page.layout === "metrics") {
@@ -224,20 +234,22 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 const sizeChanged = image.box.w !== box.w || image.box.h !== box.h;
                 const boxChanged = !isDeepStrictEqual(box, image.box);
                 const aspectChanged = Math.abs((box.w / box.h) / (image.box.w / image.box.h) - 1) > 1e-6;
-                const currentFit = element.templateKey ? page.imageFit?.fit : element.fit;
+                const slot = element.templateKey;
+                const fitOverride = slot ? getSlideImageFit(page, slot) : undefined;
+                const currentFit = slot ? fitOverride?.fit : element.fit;
                 const fitChanged = edit.fit !== undefined && edit.fit !== currentFit;
                 if (!boxChanged && !edit.source && !fitChanged) continue;
 
-                const layout = element.templateKey ? getSlideImageLayout(page, image.box) : undefined;
+                const layout = slot === "image" ? getSlideImageLayout(page, image.box) : undefined;
                 const fit = edit.fit ?? element.fit;
                 const firstSlide = page.appearance?.firstSlide ?? index === 0;
                 const position = edit.source && firstSlide && layout?.gradient && !layout.fullSlide && fit === "cover"
                   ? "right"
-                  : layout && fit === "cover" && !edit.source ? page.imageFit?.position ?? "centre" : "centre";
+                  : slot && fit === "cover" && !edit.source ? fitOverride?.position ?? "centre" : "centre";
                 imageChanges.push({
-                  index, elementId: element.id, box, source: edit.source, fit: { fit, position },
+                  index, elementId: element.id, slot, box, source: edit.source, fit: { fit, position },
                   image, sizeChanged, layout, description: element.description,
-                  preserveBytesInRender: !!layout && !edit.source && !aspectChanged && !fitChanged && !page.imageFit,
+                  preserveBytesInRender: !!slot && !edit.source && !aspectChanged && !fitChanged && !fitOverride,
                 });
                 if (layout && boxChanged) page = { ...page, imageLayout: layout };
                 changedPages.add(index + 1);
@@ -312,7 +324,7 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
           const imageSignal = abortSignal
             ? AbortSignal.any([abortSignal, imageController.signal]) : imageController.signal;
           const warnings = await Promise.all(imageChanges.map(async (change) => {
-            const { index, elementId, box, source, image, layout, sizeChanged, preserveBytesInRender } = change;
+            const { index, elementId, slot, box, source, image, layout, sizeChanged, preserveBytesInRender } = change;
             const fit = { ...change.fit };
             let bytes = image.bytes;
             let description = change.description;
@@ -346,11 +358,12 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
               imageSignal.throwIfAborted();
               images.set(elementId, { ...image, bytes, box, fallback: source ? false : image.fallback });
               const page = revised[index];
-              if (layout) {
-                if (page.layout === "metrics" || page.layout === "steps") {
-                  throw new Error("This layout does not support a template image.");
-                }
-                revised[index] = { ...page, imageBrief: description, imageFit: preserveBytesInRender ? undefined : fit };
+              if (slot) {
+                const updated = setSlideImageBrief(page, slot, description ?? undefined);
+                const fitOverride = preserveBytesInRender ? undefined : fit;
+                revised[index] = slot === "image"
+                  ? { ...updated, imageFit: fitOverride }
+                  : { ...updated, imageSlotFits: { ...updated.imageSlotFits, [slot]: fitOverride } };
               } else {
                 revised[index] = {
                   ...page,

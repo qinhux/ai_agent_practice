@@ -476,14 +476,10 @@ export function describeSlideElement(element: SlideElement) {
 }
 
 // DrawingML alpha represents opacity in thousandths of a percent.
-function imageGradientFill(background: string, legacyLayout?: true) {
-  const color = legacyLayout ? "000000" : background;
-  const stop = (position: number, opacity: number) =>
-    `<a:gs pos="${position}"><a:srgbClr val="${color}"><a:alpha val="${opacity}"/></a:srgbClr></a:gs>`;
-  const stops = legacyLayout ? stop(0, 70000) : stop(0, 97000) + stop(47000, 94000);
-  return '<a:gradFill rotWithShape="1"><a:gsLst>' + stops + stop(100000, 0) +
-    '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
-}
+const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
+  '<a:gs pos="0"><a:srgbClr val="000000"><a:alpha val="60000"/></a:srgbClr></a:gs>' +
+  '<a:gs pos="100000"><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:gs>' +
+  '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
 
 const pptxLayouts = { "16:9": "LAYOUT_WIDE" } as const;
 
@@ -497,7 +493,7 @@ export async function renderPresentation(
   pptx.layout = pptxLayouts[theme.aspectRatio];
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
-  const slidesWithGradient = new Map<string, string>();
+  const slidesWithGradient = new Set<string>();
   const customFonts = new Map<string, FontPair>();
 
   function customFontFace(font: FontPair) {
@@ -537,7 +533,7 @@ export async function renderPresentation(
           objectName: "渐变遮罩",
           line: { transparency: 100 },
         });
-        slidesWithGradient.set(`ppt/slides/slide${index + 1}.xml`, imageGradientFill(colors.background, legacyLayout));
+        slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
       }
     }
     if (page.layout === "steps") {
@@ -598,12 +594,11 @@ export async function renderPresentation(
         const font = customFonts.get(token);
         return font ? `<a:${script} typeface="${script === "ea" ? font.eastAsian : font.latin}"` : match;
       });
-    const gradient = slidesWithGradient.get(part.name);
-    if (gradient) {
+    if (slidesWithGradient.has(part.name)) {
       // PptxGenJS cannot set a gradient fill on a shape through its public API.
       const maskFill = /(<p:sp><p:nvSpPr><p:cNvPr id="\d+" name="渐变遮罩">[\s\S]*?<\/a:prstGeom>)<a:noFill\/>/;
       if (!maskFill.test(xml)) throw new Error("Missing PowerPoint gradient mask shape.");
-      xml = xml.replace(maskFill, (_, shape: string) => shape + gradient);
+      xml = xml.replace(maskFill, (_, shape: string) => shape + imageGradientFill);
     }
     archive.file(part.name, xml);
   }));

@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { getPrisma } from "./db";
+import { emailAuthOptions } from "./email-auth-options";
 
 function createAuth() {
   const baseURL = process.env.BETTER_AUTH_URL;
@@ -14,8 +15,8 @@ function createAuth() {
     appName: "Agent Practice",
     baseURL,
     secret,
-    database: prismaAdapter(getPrisma(), { provider: "postgresql" }),
-    emailAndPassword: { enabled: true },
+    database: prismaAdapter(getPrisma(), { provider: "postgresql", transaction: true }),
+    ...emailAuthOptions(),
   });
 }
 

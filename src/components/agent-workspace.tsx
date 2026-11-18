@@ -338,6 +338,8 @@ export function AgentWorkspace() {
           <p role="alert" className="text-sm text-destructive">无法连接登录服务。</p>
           <Button variant="outline" onClick={() => void refetch()}>重试</Button>
         </main>
+      ) : session && !session.user.emailVerified ? (
+        <AuthForm mode="verify" initialEmail={session.user.email} />
       ) : session ? (
         <Chat key={session.user.id} />
       ) : (

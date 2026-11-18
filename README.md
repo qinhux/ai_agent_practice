@@ -17,7 +17,7 @@ openssl rand -hex 32
 docker compose up --build
 ```
 
-Compose 等待 PostgreSQL 就绪后执行 Prisma 迁移，再启动应用。打开 [http://localhost:3000](http://localhost:3000)，注册并登录，点击「查询上海时间」填入示例，然后发送。Agent 调用工具时，聊天会显示工具执行状态和流式回复。没有模型密钥时仍可注册和登录。
+Compose 等待 PostgreSQL 就绪后执行 Prisma 迁移，再启动应用。先按下方「邮箱认证」配置 SMTP，然后打开 [http://localhost:3000](http://localhost:3000)，注册、验证邮箱并登录，点击「查询上海时间」填入示例，然后发送。Agent 调用工具时，聊天会显示工具执行状态和流式回复。没有模型密钥时仍可注册和登录。
 
 在聊天里输入「做一份 8 页的武汉城市介绍 PPT」，Agent 会生成可编辑的 `.pptx`，并根据每页内容决定是否配图。无图页会使用纯文字版式。完成后在聊天里点击「下载 PPT」。支持 1–12 页，默认 8 页。需要配图的页面在生图失败时会使用备用插图，下载卡片会显示使用备用图的页数。
 
@@ -55,6 +55,31 @@ npm test
 npm run build
 ```
 
+## 邮箱认证
+
+支持邮箱密码注册、邮箱验证、登录、退出和密码找回。注册不会自动登录，必须先输入真实邮件中的六位数字验证码；已有未验证账号也需补验证，原账号 ID、PPT 和图片保持不变。工作台和业务 API 都会检查邮箱验证状态。
+
+在 `.env` 中配置以下参数（请勿将真实凭据提交到 Git）：
+
+```dotenv
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=your-address@qq.com
+SMTP_PASS=your-smtp-authorization-code
+MAIL_FROM="Agent Practice <your-address@qq.com>"
+```
+
+QQ 邮箱需在网页端「设置 → 账号与安全 → 安全设置」开启 SMTP 服务并生成授权码。`SMTP_PASS` 使用授权码，不使用 QQ 登录密码；`MAIL_FROM` 的邮箱应与发信账号一致。465 使用 `SMTP_SECURE=true`；若其他服务商要求 587/STARTTLS，则使用 `false`，连接仍强制启用 TLS。修改环境变量后重启应用；Docker 部署需要重建/重新创建 app 服务以应用新代码和环境变量。
+
+页面入口：`/login`、`/register`、`/verify-email`、`/forgot-password` 和 `/reset-password`。邮箱验证码有效期 5 分钟、最多允许 5 次错误尝试，成功后只能使用一次；验证码以哈希形式保存，重发后旧验证码失效。旧版邮箱验证链接停用。密码重置邮件有效期 30 分钟，重置链接只能使用一次，成功后撤销该用户的所有旧会话。重发按钮冷却 60 秒，验证码发送接口对同一客户端每分钟最多允许 1 次请求；服务端同时限制注册、登录和发信请求频率（当前为单实例内存计数，重启后重置）。
+
+发信失败时页面会提供重试提示。若注册时邮件未能发出，账号可能已创建，可进入「验证邮箱」页重新发送，无需重复注册。若注册邮箱已存在，界面会返回通用提示；已有账号请直接登录，忘记密码请走找回流程。
+
+本地开发保留 `BETTER_AUTH_URL=http://localhost:3000`，密码重置邮件链接应在运行项目的这台电脑上打开。邮箱验证邮件可以在手机等其他设备上查看，然后在项目页面输入验证码。需要跨设备访问时，改成设备可访问的应用地址，并从该地址打开网站；正式部署使用 HTTPS。账号验证和密码重置邮件均由真实 SMTP 服务发送。
+
+运行 `npm test` 可验证注册验证流程、重发、密码重置单次使用、旧会话撤销、验证码过期与错误次数、重发失效和单次使用、过期重置链接、跳转校验、发信错误和限流。测试使用隔离的内存数据库与捕获邮件，不会给真实用户发送邮件。
+
 ## 项目入口
 
 | 路径 | 用途 |
@@ -62,7 +87,9 @@ npm run build
 | `src/app/page.tsx` | 注册、登录和聊天的页面入口 |
 | `src/components/ui/`、`components.json` | shadcn/ui 组件及 CLI 配置 |
 | `src/stores/chat-store.ts` | Zustand 管理聊天草稿，AI SDK 管理流式消息 |
-| `src/app/api/auth/[...all]/route.ts` | Better Auth 邮箱密码注册、登录和会话 |
+| `src/app/api/auth/[...all]/route.ts` | Better Auth 邮箱认证接口及邮件发送状态处理 |
+| `src/app/(auth)/`、`src/components/auth-form.tsx` | 登录、注册、验证邮箱与密码找回页面 |
+| `src/server/mail.ts`、`src/server/email-auth-options.ts` | SMTP 真实发信与邮箱认证策略 |
 | `src/app/api/chat/route.ts` | 校验会话和请求，返回 AI SDK UI 消息 SSE |
 | `src/server/agent.ts` | TypeScript Agent Runtime，注册时间查询、图片生成和 PPT 生成工具 |
 | `src/app/api/health/route.ts` | `GET /api/health` 检查应用进程 |

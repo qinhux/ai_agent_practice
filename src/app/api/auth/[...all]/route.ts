@@ -1,12 +1,13 @@
 import { toNextJsHandler } from "better-auth/next-js";
 import { getAuth } from "@/server/auth";
+import { withEmailDelivery } from "@/server/auth-email-delivery";
 
 export const runtime = "nodejs";
 
 export function GET(request: Request) {
-  return toNextJsHandler(getAuth()).GET(request);
+  return withEmailDelivery(() => toNextJsHandler(getAuth()).GET(request));
 }
 
 export function POST(request: Request) {
-  return toNextJsHandler(getAuth()).POST(request);
+  return withEmailDelivery(() => toNextJsHandler(getAuth()).POST(request));
 }

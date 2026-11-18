@@ -37,6 +37,9 @@ export async function POST(request: Request) {
   if (!session) {
     return new Response("请先登录。", { status: 401 });
   }
+  if (!session.user.emailVerified) {
+    return new Response("请先验证邮箱。", { status: 403 });
+  }
 
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {

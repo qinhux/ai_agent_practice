@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 export async function GET(request: Request, { params }: RouteContext<"/api/images/[id]">) {
   const session = await getAuth().api.getSession({ headers: request.headers });
   if (!session) return new Response("请先登录。", { status: 401 });
+  if (!session.user.emailVerified) return new Response("请先验证邮箱。", { status: 403 });
 
   const { id } = await params;
   const image = z.uuid().safeParse(id).success

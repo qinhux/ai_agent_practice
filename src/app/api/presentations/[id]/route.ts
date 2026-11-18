@@ -9,6 +9,9 @@ export async function GET(request: Request, { params }: RouteContext<"/api/prese
   if (!session) {
     return new Response("请先登录。", { status: 401 });
   }
+  if (!session.user.emailVerified) {
+    return new Response("请先验证邮箱。", { status: 403 });
+  }
 
   const { id } = await params;
   const presentation = z.uuid().safeParse(id).success

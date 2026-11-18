@@ -600,6 +600,7 @@ export async function renderPresentation(
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
   const slidesWithGradient = new Set<string>();
   const customFonts = new Map<string, FontPair>();
+  const requiredColors = [...new Set((theme.colorRequirements?.roles ?? []).map((role) => theme.colors[role]))];
 
   function customFontFace(font: FontPair) {
     // PptxGenJS inserts font names into XML attributes without escaping them.
@@ -684,6 +685,20 @@ export async function renderPresentation(
         fontFace: font ? customFontFace(font) : style.fontFace,
         objectName: templateKey ?? id, bullet,
       });
+    }
+    if (requiredColors.length) {
+      const bestContrastColor = requiredColors.reduce((best, color) =>
+        contrastRatio(color, colors.background) > contrastRatio(best, colors.background) ? color : best);
+      const footerColors = theme.colorRequirements?.perSlide === "all" ? requiredColors : [bestContrastColor];
+      // Draw last so full-slide images and edited elements cannot cover the required colors.
+      for (const [colorIndex, color] of footerColors.entries()) {
+        const outline = contrastRatio(color, "FFFFFF") >= contrastRatio(color, "000000") ? "FFFFFF" : "000000";
+        slide.addShape(pptx.ShapeType.rect, {
+          x: theme.grid.pageMargin / 72 + colorIndex * 0.85, y: 7.12, w: 0.75, h: 0.1,
+          objectName: `主题必用色-${color}`,
+          fill: { color }, line: { color: outline, width: 0.5 },
+        });
+      }
     }
   }
 

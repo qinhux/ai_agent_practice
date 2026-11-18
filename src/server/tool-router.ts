@@ -9,9 +9,28 @@ function messageText(message: ChatMessage, limit: number) {
   return message.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n").slice(0, limit);
 }
 
+function previouslyEnabledDomains(
+  messages: readonly ChatMessage[],
+  registry: Pick<ToolRegistry, "domainSchema" | "domainsForTool">,
+) {
+  const domains = new Set<ToolDomain>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      if (!part.type.startsWith("tool-")) continue;
+      // Even a failed operation must remain available for a retry in the next turn.
+      for (const domain of registry.domainsForTool(part.type.slice(5))) domains.add(domain);
+      if (part.type !== "tool-requestToolDomains" || part.state !== "output-available") continue;
+      const output = z.object({ domains: z.array(registry.domainSchema) }).safeParse(part.output);
+      if (output.success) for (const domain of output.data.domains) domains.add(domain);
+    }
+  }
+  return [...domains];
+}
+
 export async function routeToolDomains(
   messages: readonly ChatMessage[],
-  registry: Pick<ToolRegistry, "catalog" | "domains" | "domainSchema">,
+  registry: Pick<ToolRegistry, "catalog" | "domains" | "domainSchema" | "domainsForTool">,
   model: LanguageModel,
   providerOptions: ProviderOptions,
   signal: AbortSignal,
@@ -19,6 +38,7 @@ export async function routeToolDomains(
   signal.throwIfAborted();
   const latest = messages.at(-1);
   if (!latest) return [];
+  const previous = previouslyEnabledDomains(messages, registry);
 
   const recentHistory = messages.slice(-9, -1).map((message) => ({
     role: message.role,
@@ -59,7 +79,10 @@ export async function routeToolDomains(
       abortSignal: AbortSignal.any([signal, AbortSignal.timeout(8_000)]),
     });
     signal.throwIfAborted();
-    return [...new Set(schema.parse(output).domains)];
+    const selected = [...new Set([...previous, ...schema.parse(output).domains])];
+    // Routing is an optimization, not a capability boundary. An empty classification
+    // must not leave the agent with only the domain-enabling tool and strand a task.
+    return selected.length ? selected : [...registry.domains];
   } catch (error) {
     signal.throwIfAborted();
     console.warn("Tool routing failed:", error instanceof Error ? error.name : "UnknownError");

@@ -1,6 +1,7 @@
 import { getPrisma } from "./db";
 import type { Prisma } from "@/generated/prisma/client";
 import type { FileDeliveryData } from "@/lib/file-delivery";
+import { validatePresentationCitations } from "./presentation-research";
 import {
   elementBoxSchema,
   getSlideColors,
@@ -55,6 +56,7 @@ export async function preparePresentationDrafts(
   }[] = [];
   for (const { source, images, parentId, warnings } of drafts) {
     abortSignal.throwIfAborted();
+    validatePresentationCitations(source);
     const bytes = await renderPresentation(source, getSlideColors(source), images);
     const missingImageWarnings = source.slides.flatMap((page, index) => {
       const missingSlots = getSlideImageSlots(page.layout).filter(({ id }) => {
@@ -73,7 +75,7 @@ export async function preparePresentationDrafts(
       },
       slideCount: source.slides.length,
       fallbackImageCount: new Set([...images.values()].filter((image) => image.fallback).map((image) => image.slideId)).size,
-      warnings: [...missingImageWarnings, ...warnings],
+      warnings: [...new Set([...missingImageWarnings, ...warnings, ...(source.research?.warnings ?? [])])],
     });
   }
   return async (transaction: Prisma.TransactionClient) => {

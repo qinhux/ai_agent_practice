@@ -14,6 +14,8 @@ import { getAuth } from "@/server/auth";
 import { FileDrafts } from "@/server/file-drafts";
 import { createToolRegistry } from "@/server/tool-registry";
 import { routeToolDomains } from "@/server/tool-router";
+import { ResearchError, researchModeSchema } from "@/server/research-schema";
+import { WebResearch } from "@/server/web-research";
 
 export const runtime = "nodejs";
 const maxChatBytes = 256 * 1024;
@@ -49,10 +51,12 @@ export async function POST(request: Request) {
 
   let messages: unknown;
   let logoInput: unknown;
+  let researchInput: unknown;
   try {
     const input = JSON.parse(body);
     messages = input?.messages;
     logoInput = input?.coverLogo;
+    researchInput = input?.researchMode;
   } catch {
     return new Response("请求必须包含有效的 JSON。", { status: 400 });
   }
@@ -61,6 +65,8 @@ export async function POST(request: Request) {
     return new Response("对话格式无效或消息过多。", { status: 400 });
   }
   const encodedLogo = coverLogoSchema.optional().safeParse(logoInput);
+  const researchMode = researchModeSchema.default("auto").safeParse(researchInput);
+  if (!researchMode.success) return new Response("搜索模式无效。", { status: 400 });
   if (!encodedLogo.success) return new Response("封面 Logo 格式无效或超过 1 MB。", { status: 400 });
   if (bodyBytes - (encodedLogo.data?.length ?? 0) > maxChatBytes) {
     return new Response("对话内容太长，请开始新对话。", { status: 413 });
@@ -87,9 +93,10 @@ export async function POST(request: Request) {
     }) : [];
   }).join("\n");
 
-  const drafts = new FileDrafts(session.user.id);
   const model = createAgentModel(apiKey);
-  const registry = createToolRegistry(model, session.user.id, drafts, providerOptions, { logo, userText });
+  const drafts = new FileDrafts(session.user.id);
+  const registry = createToolRegistry(model, session.user.id, drafts, providerOptions,
+    { logo, userText, webResearch: new WebResearch(researchMode.data) });
   const historyTools = { ...registry.tools, ...legacyPresentationTools };
   const result = await safeValidateUIMessages<ChatMessage>({
     messages, tools: historyTools, dataSchemas: fileDeliverySchemas,
@@ -167,7 +174,7 @@ export async function POST(request: Request) {
           } catch (error) {
             if (!signal.aborted) {
               console.error("File save failed:", error instanceof Error ? error.name : "UnknownError");
-              writer.write({ type: "data-file-error", data: "文件保存失败，本轮未生成新版本。请稍后重试。" });
+              writer.write({ type: "data-file-error", data: error instanceof ResearchError ? error.message : "文件保存失败，本轮未生成新版本。请稍后重试。" });
             }
           }
         } else {

@@ -7,15 +7,18 @@ import type { PresentationModelOptions } from "./presentation-json";
 import { availableCoverFields, planPresentation } from "./presentation-planner";
 import { coverDetailsSchema, coverFieldSchema, coverLogoSize, getSlideGrid, maxSlideCount, type PresentationSource } from "./presentations";
 import { generateSlides } from "./slide-generator";
+import { researchPresentation } from "./presentation-research";
+import { ResearchError } from "./research-schema";
+import type { WebResearch } from "./web-research";
 
 const defaultSlideCount = 8;
 
-export type PresentationResources = { logo?: Uint8Array<ArrayBuffer>; userText: string };
+export type PresentationResources = { logo?: Uint8Array<ArrayBuffer>; userText: string; webResearch?: WebResearch };
 
 export function createPresentationTool(
   model: PresentationModelOptions["model"], drafts: PresentationDrafts,
   providerOptions: PresentationModelOptions["providerOptions"],
-  { logo, userText }: PresentationResources,
+  { logo, userText, webResearch }: PresentationResources,
 ) {
   return tool({
     description: `Create a new editable PowerPoint draft for this turn. For existing PPTs, use addRemoveOrMoveSlides for whole slides, or updateSlideElements and addOrRemoveSlideElements for individual elements. For brainstorming, outlines, titles, or wording alone, answer in chat. Use the conversation to fill in the brief. Ask for the topic or essential source material only if it is missing. The supported range is 1–${maxSlideCount} slides. If the requested count is outside that range, explain the range and ask for a supported count.`,
@@ -55,25 +58,31 @@ export function createPresentationTool(
           const labels = { author: "汇报人或团队", date: "日期", extraInfo: "辅助信息", footer: "页脚文案", metrics: "关键数据", logo: "Logo 图片" };
           return { error: `请提供封面所需的${missing.map((key) => labels[key as keyof typeof labels] ?? key).join("、")}。` };
         }
-        const { theme, plan } = await planPresentation(options, request, abortSignal);
-        const slides: PresentationSource["slides"] = await generateSlides(options, request, plan, theme, abortSignal);
-        const source: PresentationSource = { title: plan.title, theme, slides };
+        const research = webResearch ? await researchPresentation(options, request, userText, webResearch, abortSignal) : undefined;
+        const researchedRequest = { ...request, research };
+        const { theme, plan } = await planPresentation(options, researchedRequest, abortSignal);
+        const slides = await generateSlides(options, researchedRequest, plan, theme, abortSignal);
+        let source: PresentationSource = { title: plan.title, theme, slides, research };
         const images = await preparePresentationImages(source, abortSignal);
         const cover = slides[0];
         if (logo && cover.layout === "cover" && plan.slides[0].coverFields?.includes("logo")) {
           const id = randomUUID();
           const box = { x: getSlideGrid(theme.grid).margin, ...coverLogoSize };
-          slides[0] = { ...cover, addedElements: [{ type: "image", id, fit: "contain", description: "封面 Logo", role: "logo" }] };
+          source = { ...source, slides: source.slides.map((page, index) => index === 0
+            ? { ...page, addedElements: [{ type: "image" as const, id, fit: "contain" as const, description: "封面 Logo", role: "logo" as const }] } : page) };
           images.set(id, { slideId: cover.slideId, bytes: logo, box, fallback: false });
         }
         abortSignal?.throwIfAborted();
         return {
           presentationId: drafts.create(source, images),
           title: source.title, slideCount: slides.length,
+          researchStatus: research?.status, sourceCount: research?.sources.filter(({ kind }) => kind === "web").length ?? 0,
+          qualityWarnings: research?.warnings ?? [],
         };
       } catch (error) {
         abortSignal?.throwIfAborted();
         console.error("Presentation generation failed:", error instanceof Error ? error.name : "UnknownError");
+        if (error instanceof ResearchError) return { error: error.message };
         return { error: "PPT 生成失败，请稍后重试。" };
       }
     },

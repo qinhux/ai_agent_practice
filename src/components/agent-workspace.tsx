@@ -45,6 +45,7 @@ function Chat() {
   const [coverLogo, setCoverLogo] = useState<File>();
   const [logoError, setLogoError] = useState("");
   const [readingLogo, setReadingLogo] = useState(false);
+  const [researchMode, setResearchMode] = useState<"auto" | "on" | "off">("auto");
   const busy = status === "submitted" || status === "streaming";
 
   useEffect(() => {
@@ -80,7 +81,7 @@ function Chat() {
 
     setDraft("");
     setCoverLogo(undefined);
-    void sendMessage({ text }, encodedLogo ? { body: { coverLogo: encodedLogo } } : undefined);
+    void sendMessage({ text }, { body: { researchMode, ...(encodedLogo && { coverLogo: encodedLogo }) } });
   }
 
   return (
@@ -193,7 +194,7 @@ function Chat() {
                   const isEdit = part.type !== "tool-generatePresentation";
                   const action = part.type === "tool-addRemoveOrMoveSlides"
                     ? part.input?.mode === "list" ? "查询 PPT 页面" : "调整 PPT 页面"
-                    : part.type === "tool-replaceImageElement" ? "替换 PPT 配图" : isEdit ? "修改 PPT" : "生成 PPT";
+                    : part.type === "tool-replaceImageElement" ? "替换 PPT 配图" : isEdit ? "修改 PPT" : "研究资料并生成 PPT";
                   if (part.state === "output-available" && !("error" in part.output)) {
                     const legacy = legacyPresentationDownloadSchema.safeParse(part.output);
                     if (!legacy.success) return null;
@@ -217,6 +218,14 @@ function Chat() {
                     </p>
                   );
                 }
+                if (part.type === "tool-searchWeb" || part.type === "tool-readSource") {
+                  const action = part.type === "tool-searchWeb" ? "搜索资料" : "读取来源原文";
+                  const finished = part.state === "output-available";
+                  return <p key={index} role="status" className="text-xs text-muted-foreground">
+                    {finished && "error" in part.output ? part.output.error
+                      : finished ? `${action}完成` : busy ? `正在${action}…` : `${action}已结束`}
+                  </p>;
+                }
                 return null;
               })}
             </article>
@@ -237,6 +246,16 @@ function Chat() {
             </Button>
           </div>
         )}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label htmlFor="research-mode">资料来源</label>
+          <select id="research-mode" value={researchMode} disabled={busy || readingLogo}
+            onChange={(event) => setResearchMode(event.target.value as "auto" | "on" | "off")}
+            className="rounded-md border border-border bg-background px-2 py-1 text-foreground">
+            <option value="auto">自动搜索</option>
+            <option value="on">联网搜索</option>
+            <option value="off">仅用提供的资料</option>
+          </select>
+        </div>
         <form onSubmit={submit} className="flex items-center gap-2">
           <input ref={logoInput} type="file" accept={coverLogoMimeTypes.join(",")} hidden onChange={(event) => {
             const file = event.target.files?.[0];

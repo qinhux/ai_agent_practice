@@ -50,7 +50,7 @@ export function createAgent(
       const stepInstructions = [instructions, ...registry.instructionsFor(activeDomains)];
       if (inactiveDomains.length) {
         stepInstructions.push(
-          `仅当完成本轮任务还需要以下能力时，调用 requestToolDomains 启用相应能力域，再于下一步使用对应工具。日常对话直接回复。可追加的能力域：${JSON.stringify(inactiveDomains)}`,
+          `以下能力已经注册，只是尚未在当前步骤启用。需要其中的工具时，先调用 requestToolDomains，成功后在下一步继续原任务；不要把暂未启用描述成工具被删除、系统不支持或要求用户自行开启。日常对话直接回复，不调用无关工具。可追加的能力域：${JSON.stringify(inactiveDomains)}`,
         );
       }
       return {

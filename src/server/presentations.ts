@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import pptxgen from "pptxgenjs";
 import sharp, { type ResizeOptions, type Sharp } from "sharp";
 import { z } from "zod";
+import { presentationResearchSchema, ResearchError, slideCitationSchema } from "./research-schema";
 import {
   backgroundModeSchema, contrastRatio, hexColor, legacyPaletteSchema, legacyStyleSchema, luminance,
   themeFont, themeSpecSchema, upgradeLegacyTheme, type FontPair, type ThemeSpec,
@@ -214,8 +215,10 @@ export const maxSlideCount = 12;
 
 const presentationPagesSchema = z.object({
   title: presentationTitleSchema,
+  research: presentationResearchSchema.optional(),
   slides: z.array(slideContentSchema.and(z.object({
     slideId: z.uuid(),
+    citations: z.array(slideCitationSchema).max(50).optional(),
     // Preserve the original position-dependent styling when an existing slide is reordered.
     appearance: z.object({ firstSlide: z.boolean(), darkBackground: z.boolean() }).optional(),
     textStyles: z.partialRecord(textElementKeySchema, textStyleSchema).optional(),
@@ -282,7 +285,20 @@ const firstSlideTextWidth = 6.2;
 const pageNumberBox = { x: slideSize.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
 export const coverLogoSize = { y: 0.43, w: 1.45, h: 0.58 };
 
-type PresentationLayout = Pick<PresentationSource, "theme" | "legacyLayout">;
+type PresentationLayout = Pick<PresentationSource, "theme" | "legacyLayout" | "research">;
+
+export function getSlideCitationSources(page: PresentationSlide, layout: PresentationLayout) {
+  const evidenceIds = new Set(page.citations?.flatMap((citation) => citation.evidenceIds));
+  const ids = new Set(layout.research?.evidence.filter((item) => evidenceIds.has(item.id)).map((item) => item.sourceId));
+  return layout.research?.sources.filter((source) => ids.has(source.id)) ?? [];
+}
+
+export function getCitationBand(page: PresentationSlide, layout: PresentationLayout) {
+  const count = getSlideCitationSources(page, layout).length;
+  const columns = count > 3 ? 2 : 1;
+  const rows = Math.ceil(count / columns);
+  return { y: 6.95 - rows * 0.24, rows, columns, h: rows * 0.24 };
+}
 
 export function getSlideGrid({ pageMargin, columnGap, columns }: ThemeSpec["grid"]) {
   const margin = pageMargin / 72;
@@ -621,6 +637,26 @@ export function getSlideElements(
       if (asset) elements.push({ ...element, box: asset.box, fit: element.fit ?? "cover" });
     }
   }
+  if (page.citations?.length) {
+    const band = getCitationBand(page, layout);
+    const bottom = band.y - 0.12;
+    for (const element of elements) {
+      if (element.type !== "text") continue;
+      if (element.templateKey && !page.textBoxes?.[element.templateKey]) {
+        // Reserve the source band without moving the page header or altering saved user positions.
+        const top = 1.85;
+        if (element.box.y + element.box.h <= top) continue;
+        const scale = Math.min(1, (bottom - top) / (6.98 - top));
+        const start = Math.max(top, element.box.y);
+        const end = Math.max(top, element.box.y + element.box.h);
+        const y = element.box.y < top ? element.box.y : top + (start - top) * scale;
+        element.box = { ...element.box, y, h: top + (end - top) * scale - y };
+      }
+      if (element.box.y + element.box.h > bottom && element.box.y < 6.95) {
+        throw new ResearchError("文字位置与引用来源区重叠，请将该文字上移或缩小文本框。");
+      }
+    }
+  }
   return elements;
 }
 
@@ -820,11 +856,50 @@ export async function renderPresentation(
     for (const element of elements) {
       if (element.type !== "text") continue;
       const { text, box, style, bullet, font, templateKey, id, highlights } = element;
-      slide.addText(highlightedText(text, highlights, colors.accentText), {
+      const citationSources = getSlideCitationSources(page, presentation);
+      const citation = page.citations?.find((item) => item.target === (templateKey ?? id));
+      const citedSourceIds = new Set(citation?.evidenceIds.map((evidenceId) =>
+        presentation.research?.evidence.find((item) => item.id === evidenceId)?.sourceId));
+      const numberedSources = citationSources.flatMap((source, index) => citedSourceIds.has(source.id) ? [{ source, number: index + 1 }] : []);
+      const highlighted = highlightedText(text, highlights, colors.accentText);
+      const runs = typeof highlighted === "string" ? [{ text: highlighted }] : [...highlighted];
+      for (const { source, number } of numberedSources) runs.push({ text: `[${number}]`, options: {
+        superscript: true, fontSize: 10, color: colors.text,
+        ...(source.url && { hyperlink: { url: source.url } }),
+      } });
+      slide.addText(runs, {
         ...textOptions, ...box, ...style,
         fontFace: font ? customFontFace(font) : style.fontFace,
         objectName: templateKey ?? id, bullet,
       });
+    }
+    const citedSources = getSlideCitationSources(page, presentation);
+    if (citedSources.length) {
+      const band = getCitationBand(page, presentation);
+      const grid = getSlideGrid(theme.grid);
+      const trackWidth = grid.width / band.columns;
+      const short = (text: string, length: number) => text.length <= length ? text : `${text.slice(0, length - 1)}…`;
+      citedSources.forEach((source, number) => {
+        const date = source.publishedAt && Number.isFinite(Date.parse(source.publishedAt))
+          ? new Date(source.publishedAt).toISOString().slice(0, 10) : source.publishedAt;
+        const label = source.kind === "user" ? source.title : [source.publisher && short(source.publisher, 10),
+          short(source.title, band.columns === 1 ? 45 : 16), date && short(date, 10)].filter(Boolean).join(" · ");
+        slide.addText(`来源 [${number + 1}] ${label}`, {
+          x: grid.margin + number % band.columns * trackWidth, y: band.y + Math.floor(number / band.columns) * 0.24,
+          w: trackWidth - 0.12, h: 0.23, fontSize: 10, margin: 0, valign: "middle",
+          color: colors.text, fill: { color: colors.background },
+          fontFace: customFontFace(themeFont(theme, "body")), objectName: `引用来源-${number + 1}`,
+          ...(source.url && { hyperlink: { url: source.url, tooltip: source.title } }),
+        });
+      });
+      const notes = citedSources.map((source, index) => {
+        const details = (page.citations ?? []).flatMap((citation) => citation.evidenceIds.flatMap((id) => {
+          const evidence = presentation.research?.evidence.find((item) => item.id === id && item.sourceId === source.id);
+          return evidence ? [`对应内容：${citation.text}\n原文：${evidence.quote}\n位置：${evidence.location ?? "正文摘录"}\n统计时期：${evidence.period ?? "未注明"}\n适用范围：${evidence.scope ?? "见原文"}${citation.derivation ? `\n计算或推导：${citation.derivation}` : ""}`] : [];
+        }));
+        return `[${index + 1}] ${source.title}\n机构：${source.publisher ?? "用户材料"}\n链接：${source.url ?? "无公开链接，未独立核实"}\n发布日期：${source.publishedAt ?? "未注明"}\n访问时间：${source.accessedAt}\n${details.join("\n\n")}`;
+      });
+      slide.addNotes(notes.join("\n\n"));
     }
     if (requiredColors.length) {
       const bestContrastColor = requiredColors.reduce((best, color) =>

@@ -5,7 +5,10 @@ import {
   safeValidateUIMessages,
   type InferUIMessageChunk,
 } from "ai";
+import sharp from "sharp";
+import { z } from "zod";
 import { fileDeliverySchemas } from "@/lib/file-delivery";
+import { maxCoverLogoBytes } from "@/lib/presentation-logo";
 import { createAgent, createAgentModel, legacyPresentationTools, providerOptions, type ChatMessage } from "@/server/agent";
 import { getAuth } from "@/server/auth";
 import { FileDrafts } from "@/server/file-drafts";
@@ -13,6 +16,14 @@ import { createToolRegistry } from "@/server/tool-registry";
 import { routeToolDomains } from "@/server/tool-router";
 
 export const runtime = "nodejs";
+const maxChatBytes = 256 * 1024;
+const maxEncodedLogoLength = 4 * Math.ceil(maxCoverLogoBytes / 3);
+const coverLogoSchema = z.base64().min(1).max(maxEncodedLogoLength);
+const userMessageTextSchema = z.object({
+  role: z.literal("user"),
+  parts: z.array(z.unknown()),
+});
+const textPartSchema = z.object({ type: z.literal("text"), text: z.string() });
 
 export async function POST(request: Request) {
   const auth = getAuth();
@@ -31,13 +42,17 @@ export async function POST(request: Request) {
   }
 
   const body = await request.text();
-  if (Buffer.byteLength(body) > 256 * 1024) {
+  const bodyBytes = Buffer.byteLength(body);
+  if (bodyBytes > maxChatBytes + maxEncodedLogoLength + 16) {
     return new Response("对话内容太长，请开始新对话。", { status: 413 });
   }
 
   let messages: unknown;
+  let logoInput: unknown;
   try {
-    messages = JSON.parse(body)?.messages;
+    const input = JSON.parse(body);
+    messages = input?.messages;
+    logoInput = input?.coverLogo;
   } catch {
     return new Response("请求必须包含有效的 JSON。", { status: 400 });
   }
@@ -45,10 +60,36 @@ export async function POST(request: Request) {
   if (!Array.isArray(messages) || messages.length > 100) {
     return new Response("对话格式无效或消息过多。", { status: 400 });
   }
+  const encodedLogo = coverLogoSchema.optional().safeParse(logoInput);
+  if (!encodedLogo.success) return new Response("封面 Logo 格式无效或超过 1 MB。", { status: 400 });
+  if (bodyBytes - (encodedLogo.data?.length ?? 0) > maxChatBytes) {
+    return new Response("对话内容太长，请开始新对话。", { status: 413 });
+  }
+
+  let logo: Uint8Array<ArrayBuffer> | undefined;
+  if (encodedLogo.data) {
+    try {
+      const bytes = Buffer.from(encodedLogo.data, "base64");
+      if (bytes.length > maxCoverLogoBytes) throw new Error("Cover logo exceeds the size limit.");
+      const image = sharp(bytes, { limitInputPixels: 16_000_000 });
+      const { format } = await image.metadata();
+      if (format !== "png" && format !== "jpeg" && format !== "webp") throw new Error("Unsupported cover logo format.");
+      logo = new Uint8Array(await image.rotate().resize(512, 256, { fit: "inside", withoutEnlargement: true }).png().toBuffer());
+    } catch {
+      return new Response("请提供不超过 1 MB 的 PNG、JPEG 或 WebP 封面 Logo。", { status: 400 });
+    }
+  }
+  const userText = messages.flatMap((message) => {
+    const parsed = userMessageTextSchema.safeParse(message);
+    return parsed.success ? parsed.data.parts.flatMap((part) => {
+      const text = textPartSchema.safeParse(part);
+      return text.success ? [text.data.text] : [];
+    }) : [];
+  }).join("\n");
 
   const drafts = new FileDrafts(session.user.id);
   const model = createAgentModel(apiKey);
-  const registry = createToolRegistry(model, session.user.id, drafts, providerOptions);
+  const registry = createToolRegistry(model, session.user.id, drafts, providerOptions, { logo, userText });
   const historyTools = { ...registry.tools, ...legacyPresentationTools };
   const result = await safeValidateUIMessages<ChatMessage>({
     messages, tools: historyTools, dataSchemas: fileDeliverySchemas,

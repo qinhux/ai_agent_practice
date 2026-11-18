@@ -6,6 +6,9 @@ import { getPrisma } from "./db";
 import { generateImageAsset, getCustomImageGenerationSize } from "./images";
 import {
   addedTextSchema,
+  coverKeywordSchema,
+  coverMetricSchema,
+  coverTextFields,
   describeSlideElement,
   elementBoxSchema,
   elementIdSchema,
@@ -80,11 +83,30 @@ type ImageChange = {
 };
 
 function patchText(page: PresentationSlide, key: TextElementKey, value: string): PresentationSlide | undefined {
-  if (key === "title" || key === "subtitle") {
-    const parsed = slideTextFields[key].safeParse(value);
-    if (!parsed.success) return;
-    if (key === "title") return { ...page, title: parsed.data };
-    if (page.layout === "cover") return { ...page, subtitle: parsed.data };
+  if (key === "title") {
+    const parsed = slideTextFields.title.safeParse(value);
+    if (parsed.success) return { ...page, title: parsed.data };
+    return;
+  }
+  if (page.layout === "cover") {
+    if (Object.hasOwn(coverTextFields, key)) {
+      const parsed = coverTextFields[key as keyof typeof coverTextFields].safeParse(value);
+      if (parsed.success) return { ...page, [key]: parsed.data };
+      return;
+    }
+    if (key.startsWith("keyword") && page.keywords) {
+      const parsed = coverKeywordSchema.safeParse(value);
+      if (!parsed.success) return;
+      const position = Number(key.at(-1)) - 1;
+      return { ...page, keywords: page.keywords.map((text, index) => index === position ? parsed.data : text) };
+    }
+    const match = /^metric([1-3])(Value|Label|Detail)$/.exec(key);
+    if (!match || !page.metrics) return;
+    const position = Number(match[1]) - 1;
+    const field = match[2].toLowerCase() as keyof typeof coverMetricSchema.shape;
+    const parsed = coverMetricSchema.shape[field].safeParse(value);
+    if (parsed.success) return { ...page, metrics: page.metrics.map((metric, index) =>
+      index === position ? { ...metric, [field]: parsed.data } : metric) };
     return;
   }
 

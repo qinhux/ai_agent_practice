@@ -1,7 +1,7 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { ArrowUp, Bot, Clock3, Download, FileText, ImageIcon, LogOut, Plus, Square } from "lucide-react";
+import { ArrowUp, Bot, Clock3, Download, FileText, ImageIcon, LogOut, Plus, Square, X } from "lucide-react";
 import Image from "next/image";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AuthForm } from "@/components/auth-form";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
 import { legacyPresentationDownloadSchema, type FileDeliveryData } from "@/lib/file-delivery";
+import { coverLogoMimeTypes, maxCoverLogoBytes } from "@/lib/presentation-logo";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/server/agent";
 import { useChatStore } from "@/stores/chat-store";
@@ -40,19 +41,46 @@ function Chat() {
   const draft = useChatStore((state) => state.draft);
   const setDraft = useChatStore((state) => state.setDraft);
   const endRef = useRef<HTMLDivElement>(null);
+  const logoInput = useRef<HTMLInputElement>(null);
+  const [coverLogo, setCoverLogo] = useState<File>();
+  const [logoError, setLogoError] = useState("");
+  const [readingLogo, setReadingLogo] = useState(false);
   const busy = status === "submitted" || status === "streaming";
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = draft.trim();
-    if (!text || busy) return;
+    if (!text || busy || readingLogo) return;
+
+    let encodedLogo: string | undefined;
+    if (coverLogo) {
+      setLogoError("");
+      setReadingLogo(true);
+      try {
+        encodedLogo = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = String(reader.result);
+            resolve(dataUrl.slice(dataUrl.indexOf(",") + 1));
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(coverLogo);
+        });
+      } catch {
+        setLogoError("无法读取封面 Logo，请重新选择图片。");
+        return;
+      } finally {
+        setReadingLogo(false);
+      }
+    }
 
     setDraft("");
-    void sendMessage({ text });
+    setCoverLogo(undefined);
+    void sendMessage({ text }, encodedLogo ? { body: { coverLogo: encodedLogo } } : undefined);
   }
 
   return (
@@ -61,11 +89,13 @@ function Chat() {
         <h1 className="text-lg font-semibold">Agent 对话</h1>
         <Button
           variant="outline"
-          disabled={busy || !messages.length}
+          disabled={busy || readingLogo || !messages.length}
           onClick={() => {
             setMessages([]);
             clearError();
             setDraft("");
+            setCoverLogo(undefined);
+            setLogoError("");
           }}
         >
           <Plus aria-hidden="true" /> 新对话
@@ -197,21 +227,46 @@ function Chat() {
       </div>
       <div className="space-y-2 border-t border-border py-4">
         {error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}
+        {logoError && <p role="alert" className="text-sm text-destructive">{logoError}</p>}
+        {coverLogo && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="truncate">封面 Logo · {coverLogo.name}</span>
+            <Button type="button" variant="ghost" size="icon" className="size-7" aria-label="移除封面 Logo"
+              disabled={readingLogo} onClick={() => setCoverLogo(undefined)}>
+              <X aria-hidden="true" />
+            </Button>
+          </div>
+        )}
         <form onSubmit={submit} className="flex items-center gap-2">
+          <input ref={logoInput} type="file" accept={coverLogoMimeTypes.join(",")} hidden onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (!file) return;
+            if (!coverLogoMimeTypes.some((format) => format === file.type) || file.size < 1 || file.size > maxCoverLogoBytes) {
+              setLogoError("请选择不超过 1 MB 的 PNG、JPEG 或 WebP 图片。");
+              return;
+            }
+            setLogoError("");
+            setCoverLogo(file);
+          }} />
+          <Button type="button" variant="outline" disabled={busy || readingLogo} onClick={() => logoInput.current?.click()}>
+            <ImageIcon aria-hidden="true" /> 封面 Logo
+          </Button>
           <Input
             aria-label="消息"
             placeholder="输入消息…"
             value={draft}
+            disabled={readingLogo}
             onChange={(event) => setDraft(event.target.value)}
             maxLength={8000}
-            className="h-12"
+            className="h-12 min-w-0"
           />
           {busy ? (
             <Button type="button" variant="outline" size="icon" aria-label="停止生成" onClick={() => void stop()}>
               <Square aria-hidden="true" />
             </Button>
           ) : (
-            <Button type="submit" size="icon" aria-label="发送消息" disabled={!draft.trim()}>
+            <Button type="submit" size="icon" aria-label="发送消息" disabled={readingLogo || !draft.trim()}>
               <ArrowUp aria-hidden="true" />
             </Button>
           )}

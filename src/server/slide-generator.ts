@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { generatePresentationJson, type PresentationModelOptions } from "./presentation-json";
 import type { PresentationBrief, PresentationPlan } from "./presentation-planner";
-import { slideContentSchema, slideTextFields } from "./presentations";
+import { coverCopySchema, coverDetailsSchema, slideContentSchema, slideTextFields } from "./presentations";
 import type { ThemeSpec } from "./theme-generator";
 
 // Keep legacy slide parsing intact and enforce the renderer's limits on newly generated content.
@@ -35,6 +35,14 @@ export async function generateSlides(
             context.addIssue({ code: "custom", path: [index, "content", "imageBriefs"],
               message: "imageBriefs 的键必须与本页大纲中的 imageSlots 一致。" });
           }
+          if (content.layout === "cover") {
+            const copyKeys = coverCopySchema.keyof().options;
+            const matchesPlan = copyKeys.every((key) => (content[key] !== undefined) === Boolean(planned.coverFields?.includes(key)));
+            if (!matchesPlan || coverDetailsSchema.keyof().options.some((key) => content[key] !== undefined)) {
+              context.addIssue({ code: "custom", path: [index, "content"],
+                message: "封面文案字段必须与 coverFields 的文案项一致。资料字段和 Logo 由服务端填入。" });
+            }
+          }
           if (content.layout === "summary" && content.closing &&
             (index !== plan.slides.length - 1 || content.points.length !== 1 || content.points[0].length > 50)) {
             context.addIssue({ code: "custom", path: [index], message: "只有末页且只有一条不超过 50 字的结论时可设置 closing。" });
@@ -42,8 +50,8 @@ export async function generateSlides(
         }
       }),
   });
-  const pages = plan.slides.map(({ layout, goal, keyPoints, imageSlots, coverStyle, backgroundMode }, index) =>
-    ({ slideNumber: index + 1, layout, goal, keyPoints, imageSlots, coverStyle, backgroundMode }));
+  const pages = plan.slides.map(({ layout, goal, keyPoints, imageSlots, coverStyle, coverFields, backgroundMode }, index) =>
+    ({ slideNumber: index + 1, layout, goal, keyPoints, imageSlots, coverStyle, coverFields, backgroundMode }));
   const { slides } = await generatePresentationJson(options, "slide content", schema,
     `按照给定的 PowerPoint 大纲写出逐页内容。只返回 {"slides":[{"slideNumber":1,"content":{...}},...]}。按原顺序返回所有页，保留原页码和布局。
 content 使用以下结构：
@@ -56,6 +64,7 @@ content 使用以下结构：
 {"layout":"image-focus","title":"...","points":["..."],"imageBriefs":{"image":"..."}}
 {"layout":"image-comparison","title":"...","leftCaption":"...","rightCaption":"...","imageBriefs":{"leftImage":"...","rightImage":"..."}}
 标题最多 50 字，副标题可选、最多 90 字，双栏小标题最多 26 字。bullets 或 summary 页包含 1–4 条要点，每条最多 90 字。双栏每栏 1–3 条要点，每条最多 60 字。
+封面按 coverFields 填写可选文案项：subtitle（最多 90 字）、eyebrow（场合或栏目，最多 26 字）、tagline（一句话主张，最多 48 字）、description（简短描述，最多 80 字）、keywords（1–4 个，每个最多 12 字）。保留用户指定的精确文案。各项各有用途，避免重复。author、date、metrics、extraInfo、footer 和 logo 从原始资料由服务端补入，文案 JSON 省略这些字段。
 metrics 写 1–3 项，value 最多 14 字并含必要单位，label 最多 20 字，detail 最多 60 字，用于解释口径或含义。忠实保留材料里的数值。
 steps 写 3–5 个有序节点，marker 用于日期或阶段标记，最多 12 字；省略时自动编号。heading 最多 14 字，detail 最多 42 字。
 image-focus 写 1–2 条解读，每条最多 72 字，围绕图中可示意的主体或结构。
@@ -65,9 +74,11 @@ image-comparison 左右图注各最多 80 字，分别描述对应图的含义�
 所有文本使用单行纯文本。按需求指定的语言和主题风格写作，忠实使用提供的材料，保留用户指定的精确文案，避免编造统计数据、引文或来源。`,
     JSON.stringify({ brief, title: plan.title, pages, theme }), signal);
   return slides.map(({ content }, index) => {
-    const { slideId, backgroundMode, coverStyle } = plan.slides[index];
-    return content.layout === "cover"
-      ? { ...content, slideId, backgroundMode, coverStyle }
-      : { ...content, slideId, backgroundMode };
+    const { slideId, backgroundMode, coverStyle, coverFields } = plan.slides[index];
+    if (content.layout !== "cover") return { ...content, slideId, backgroundMode };
+    const details = Object.fromEntries(coverDetailsSchema.keyof().options
+      .filter((key) => coverFields?.includes(key))
+      .map((key) => [key, brief.coverDetails?.[key]]));
+    return { ...content, ...details, slideId, backgroundMode, coverStyle };
   });
 }

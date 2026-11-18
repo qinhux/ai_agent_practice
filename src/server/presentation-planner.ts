@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { generatePresentationJson, type PresentationModelOptions } from "./presentation-json";
-import { coverStyleSchema, getSlideImageSlots, imageSlotSchema, presentationTitleSchema, slideContentSchema } from "./presentations";
+import {
+  coverCopySchema, coverDetailsSchema, coverFieldSchema, coverStyleSchema, getSlideImageSlots,
+  imageSlotSchema, presentationTitleSchema, slideContentSchema, type CoverField,
+} from "./presentations";
 import { backgroundModeSchema, generatedThemeSpecSchema, themeInstructions } from "./theme-generator";
 
 const slideLayoutIds = slideContentSchema.options.map(({ shape }) => shape.layout.value);
@@ -9,7 +12,7 @@ const slideLayoutCatalog = {
   cover: {
     role: "封面",
     suitableFor: "介绍整份演示文稿的主题",
-    content: "仅可用于首页，放主标题和可选副标题",
+    content: "仅用于首页，主标题必填，其他内容按主题、受众和用户要求选择",
   },
   bullets: {
     role: "正文",
@@ -68,10 +71,14 @@ const plannedSlideSchema = z.object({
   goal: z.string().trim().min(1).max(120),
   keyPoints: z.array(z.string().trim().min(1).max(160)).min(1).max(5),
   coverStyle: coverStyleSchema.optional(),
+  coverFields: z.array(coverFieldSchema).max(coverFieldSchema.options.length).optional(),
   imageSlots: z.array(imageSlotSchema),
   backgroundMode: backgroundModeSchema.optional(),
 }).refine((page) => (page.layout === "cover") === (page.coverStyle !== undefined), {
   path: ["coverStyle"], message: "封面必须选择 full-bleed 或 split-right，其他版式省略 coverStyle。",
+}).refine(({ layout, coverFields }) => (layout === "cover") === (coverFields !== undefined) &&
+  (!coverFields || new Set(coverFields).size === coverFields.length), {
+  path: ["coverFields"], message: "仅封面填写 coverFields，可填空数组，字段不得重复。",
 }).refine(({ layout, imageSlots }) => {
   const slots = getSlideImageSlots(layout);
   const selected = new Set(imageSlots);
@@ -87,19 +94,38 @@ export type PresentationBrief = {
   audience?: string;
   language?: string;
   context?: string;
+  coverDetails?: z.infer<typeof coverDetailsSchema>;
+  requiredCoverFields?: CoverField[];
+  hasLogo?: boolean;
 };
+
+export function availableCoverFields({ coverDetails, hasLogo }: PresentationBrief): ReadonlySet<CoverField> {
+  const available = new Set<CoverField>(coverCopySchema.keyof().options);
+  for (const key of coverDetailsSchema.keyof().options) {
+    if (coverDetails?.[key] !== undefined) available.add(key);
+  }
+  if (hasLogo) available.add("logo");
+  return available;
+}
 
 export async function planPresentation(
   options: PresentationModelOptions,
   brief: PresentationBrief,
   signal: AbortSignal | undefined,
 ) {
+  const available = availableCoverFields(brief);
+  const required = new Set(brief.requiredCoverFields);
+  if (brief.hasLogo) required.add("logo");
   const schema = z.object({
     theme: generatedThemeSpecSchema,
     plan: z.object({
       title: presentationTitleSchema,
       slides: z.array(plannedSlideSchema).length(brief.slideCount)
-        .refine((slides) => slides.slice(1).every(({ layout }) => layout !== "cover"), "封面只能位于第一页。"),
+        .refine((slides) => slides.slice(1).every(({ layout }) => layout !== "cover"), "封面只能位于第一页。")
+        .refine(([first]) => {
+          const selected = first?.coverFields ?? [];
+          return selected.every((field) => available.has(field)) && [...required].every((field) => selected.includes(field));
+        }, "封面只能使用可用字段，且必须包含用户要求的字段。"),
     }),
   });
   const { theme, plan } = await generatePresentationJson(options, "plan", schema,
@@ -109,6 +135,8 @@ plan.title 最多 60 字，slides 恰好有 ${brief.slideCount} 项，按放映�
 多页演示通常以 cover 开场。根据主题、受众和标题选择封面的 coverStyle，imageSlots 填 ["image"]。适合展现场景、氛围或全景时选 full-bleed，画面铺满全页，左侧预留标题区。适合突出单个产品、人物或需要独立文字区时选 split-right，左侧放文字，右侧为上下铺满的配图。其他版式省略 coverStyle。
 页面可通过 backgroundMode 指定 light 或 dark，用于响应用户的要求或有意突出某页。通常省略此字段，默认多页稿的封面和一句话收尾页用深色，其他页用浅色。
 layout 从下表选择。根据内容选版式，避免重复。单页直接呈现核心内容。goal 描述本页叙事作用，keyPoints 概括要覆盖的材料。
+封面用 coverFields 数组列出本次要显示的可选字段，主标题必填，不列入数组。可用字段为 ${JSON.stringify([...available])}，必须使用的字段为 ${JSON.stringify([...required])}。有必用字段时，第一页必须采用封面版式。其余版式省略 coverFields。
+根据用户需求、主题和受众选择：正式汇报可用 eyebrow（场合或栏目）、author、date；品牌发布可用 logo、tagline（一句话主张）；项目速览或城市名片可用 metrics、extraInfo（地点或编号）或 keywords。description 用于简短背景，footer 用于系列名或版权。副标题、核心文案和描述选能补充标题的内容，默认最多用两项。必要字段优先，避免自动填满。仅在 coverDetails 中有明确资料时才可选对应字段。Logo 只使用用户附上的素材。
 
 ${layoutInstructions}
 

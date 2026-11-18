@@ -32,9 +32,36 @@ const imageCaption = slideText(80);
 const metricSchema = z.object({ value: slideText(14), label: slideText(20), detail: slideText(60) });
 const stepSchema = z.object({ marker: slideText(12).optional(), heading: slideText(14), detail: slideText(42) });
 const imageFocusPoints = z.array(slideText(72)).min(1).max(2);
+export const coverTextFields = {
+  subtitle: slideText(90),
+  eyebrow: slideText(26),
+  tagline: slideText(48),
+  description: slideText(80),
+  author: slideText(36),
+  date: slideText(28),
+  extraInfo: slideText(48),
+  footer: slideText(42),
+};
+export const coverMetricSchema = metricSchema.extend({ detail: slideText(32).optional() });
+export const coverKeywordSchema = slideText(12);
+export const coverCopySchema = z.object({
+  subtitle: coverTextFields.subtitle.optional(),
+  eyebrow: coverTextFields.eyebrow.optional(),
+  tagline: coverTextFields.tagline.optional(),
+  description: coverTextFields.description.optional(),
+  keywords: z.array(coverKeywordSchema).min(1).max(4).optional(),
+});
+export const coverDetailsSchema = z.object({
+  author: coverTextFields.author.optional(),
+  date: coverTextFields.date.optional(),
+  extraInfo: coverTextFields.extraInfo.optional(),
+  footer: coverTextFields.footer.optional(),
+  metrics: z.array(coverMetricSchema).min(1).max(3).optional(),
+});
+export const coverFieldSchema = z.enum([...coverCopySchema.keyof().options, ...coverDetailsSchema.keyof().options, "logo"]);
+export type CoverField = z.infer<typeof coverFieldSchema>;
 export const slideTextFields = {
   title,
-  subtitle: slideText(90),
   points: z.array(slideText(90)).min(1).max(4),
   columnHeading: column.shape.heading,
   columnPoints: z.array(slideText(60)).min(1).max(3),
@@ -47,7 +74,8 @@ export const slideTextFields = {
 const slideFields = { title, backgroundMode: backgroundModeSchema.optional(), imageBriefs };
 export const coverStyleSchema = z.enum(["full-bleed", "split-right"]);
 const slideLayoutSchema = z.discriminatedUnion("layout", [
-  z.object({ layout: z.literal("cover"), ...slideFields, coverStyle: coverStyleSchema.optional(), subtitle: slideText(90).optional(), imageBrief }),
+  z.object({ layout: z.literal("cover"), ...slideFields, ...coverCopySchema.shape, ...coverDetailsSchema.shape,
+    coverStyle: coverStyleSchema.optional(), imageBrief }),
   // 要点列表页。这一页有一个标题，正文在同一栏里逐条列出，每条前面有一个圆点 •
   z.object({ layout: z.literal("bullets"), ...slideFields, points, imageBrief }),
   z.object({ layout: z.literal("two-columns"), ...slideFields, left: column, right: column, imageBrief }),
@@ -95,8 +123,10 @@ export const textStyleSchema = z.strictObject({
   italic: z.boolean().optional(),
   align: z.enum(["left", "center", "right", "justify"]).optional(),
 });
+const keywordElementKeys = ["keyword1", "keyword2", "keyword3", "keyword4"] as const;
 export const textElementKeySchema = z.enum([
-  "title", "subtitle", "point1", "point2", "point3", "point4",
+  "title", ...z.object(coverTextFields).keyof().options, "point1", "point2", "point3", "point4",
+  ...keywordElementKeys,
   "leftHeading", "leftPoint1", "leftPoint2", "leftPoint3",
   "rightHeading", "rightPoint1", "rightPoint2", "rightPoint3",
   "leftCaption", "rightCaption",
@@ -132,7 +162,7 @@ export const slideElementDefinitionSchema = z.discriminatedUnion("type", [
 ]);
 const addedElementSchema = z.discriminatedUnion("type", [
   addedTextDefinition.extend({ id: z.uuid() }),
-  addedImageDefinition.omit({ generatedImageId: true, box: true }).extend({ id: z.uuid() }),
+  addedImageDefinition.omit({ generatedImageId: true, box: true }).extend({ id: z.uuid(), role: z.literal("logo").optional() }),
 ]);
 export type AddedSlideElement = z.infer<typeof addedElementSchema>;
 export const presentationTitleSchema = slideText(60);
@@ -201,6 +231,7 @@ export function isOnSlide({ x, y, w, h }: ElementBox) {
 }
 const firstSlideTextWidth = 6.2;
 const pageNumberBox = { x: slideSize.w - 1.2, y: 7.05, w: 0.85, h: 0.27 };
+export const coverLogoSize = { y: 0.43, w: 1.45, h: 0.58 };
 
 type PresentationLayout = Pick<PresentationSource, "theme" | "legacyLayout">;
 
@@ -264,9 +295,11 @@ export async function fitPresentationImage(
   image: Sharp,
   box: PresentationImage["box"],
   options: Pick<ResizeOptions, "fit" | "position" | "background">,
+  format: "jpeg" | "png" = "jpeg",
 ) {
   const { width, height } = imagePixelSize(box);
-  return new Uint8Array(await image.resize({ width, height, ...options }).jpeg({ quality: 87 }).toBuffer());
+  const resized = image.resize({ width, height, ...options });
+  return new Uint8Array(await (format === "png" ? resized.png() : resized.jpeg({ quality: 87 })).toBuffer());
 }
 
 export function imageNeedsUpscaling(
@@ -297,6 +330,7 @@ function getSlideTextElements(
   imageBox: ElementBox | undefined,
   { theme, legacyLayout }: PresentationLayout,
   hasComparisonImage: boolean,
+  hasCoverLogo: boolean,
 ): SlideTextElement[] {
   const elements: SlideTextElement[] = [];
   const hasFirstSlideImage = (page.appearance?.firstSlide ?? index === 0) && Boolean(imageBox);
@@ -306,6 +340,7 @@ function getSlideTextElements(
   const width = legacyLayout ? 11.6 : grid.width;
   const firstTextWidth = legacyLayout ? firstSlideTextWidth : grid.column(0, 6).w;
   const contentTop = legacyLayout ? 1.94 : getSlideContentTop(theme);
+  const isVisible = (key: TextElementKey) => !page.removedElementIds?.includes(templateElementId(page.slideId, key));
   function add(
     key: TextElementKey,
     text: string,
@@ -313,7 +348,7 @@ function getSlideTextElements(
     style: SlideTextElement["style"],
     bullet?: SlideTextElement["bullet"],
   ) {
-    if (page.removedElementIds?.includes(templateElementId(page.slideId, key))) return;
+    if (!isVisible(key)) return;
     const override = page.textStyles?.[key];
     const font = resolveFont(override?.fontFace, theme, key === "title" ? "title" : "body");
     elements.push({
@@ -327,6 +362,71 @@ function getSlideTextElements(
 
   if (page.layout === "cover") {
     const textWidth = hasFirstSlideImage ? firstTextWidth : imageBox ? (legacyLayout ? 5.4 : firstTextWidth) : width;
+    const supportingCopy = [
+      { key: "subtitle", h: 0.64, fontSize: subtitleSize },
+      { key: "tagline", h: 0.48, fontSize: Math.min(20, subtitleSize), bold: true, color: colors.accentText },
+      { key: "description", h: 0.62, fontSize: Math.min(17, bodySize) },
+    ] as const;
+    if (page.eyebrow || page.tagline || page.description || page.author || page.date || page.extraInfo ||
+      page.footer || page.metrics || page.keywords || hasCoverLogo) {
+      const visibleCopy = supportingCopy.filter(({ key }) => page[key] && isVisible(key));
+      const metrics = (page.metrics ?? []).map((metric, index) => ({ ...metric, slot: (index + 1) as 1 | 2 | 3 }))
+        .filter(({ slot, detail }) => isVisible(`metric${slot}Value`) || isVisible(`metric${slot}Label`) ||
+          (detail && isVisible(`metric${slot}Detail`)));
+      const keywords = (page.keywords ?? []).map((text, index) => ({ text, key: keywordElementKeys[index] }))
+        .filter(({ key }) => isVisible(key));
+      const metricsHeight = metrics.length ? 0.98 : 0;
+      const keywordsHeight = keywords.length ? 0.32 : 0;
+      const gap = 0.1;
+      const copyHeight = visibleCopy.reduce((height, copy) => height + copy.h + gap, 0);
+      const supportingHeight = copyHeight + (metricsHeight && metricsHeight + gap) + (keywordsHeight && keywordsHeight + gap);
+      const titleHeight = isVisible("title") ? Math.min(2.25, 4.95 - supportingHeight) : 0;
+      const content = { x: margin, w: textWidth };
+      let y = 1.12 + (4.95 - supportingHeight - titleHeight) / 2;
+      if (page.eyebrow) {
+        const inset = hasCoverLogo ? coverLogoSize.w + 0.23 : 0;
+        add("eyebrow", page.eyebrow, { x: margin + inset, y: 0.52, w: textWidth - inset, h: 0.4 },
+          { fontSize: 13, bold: true, color: colors.accentText });
+      }
+      if (titleHeight) {
+        add("title", page.title, { ...content, y, h: titleHeight }, { bold: true, fontSize: coverTitleSize });
+        y += titleHeight;
+      }
+      for (const { key, h, ...style } of visibleCopy) {
+        y += gap;
+        add(key, page[key]!, { ...content, y, h }, style);
+        y += h;
+      }
+      if (metrics.length) {
+        y += gap;
+        const trackWidth = textWidth / metrics.length;
+        metrics.forEach(({ value, label, detail, slot }, index) => {
+          const track = { x: margin + index * trackWidth, w: trackWidth - 0.16 };
+          add(`metric${slot}Value`, value, { ...track, y, h: 0.38 }, { fontSize: 23, bold: true, color: colors.accentText });
+          add(`metric${slot}Label`, label, { ...track, y: y + 0.39, h: 0.22 }, { fontSize: 12, bold: true });
+          if (detail) add(`metric${slot}Detail`, detail, { ...track, y: y + 0.62, h: 0.36 }, { fontSize: 10 });
+        });
+        y += metricsHeight;
+      }
+      if (keywords.length) {
+        const trackWidth = Math.min(1.5, textWidth / keywords.length);
+        keywords.forEach(({ text, key }, index) => {
+          add(key, text, { x: margin + index * trackWidth, y: y + gap, w: trackWidth - 0.12, h: keywordsHeight },
+            { fontSize: 12, bold: true, color: colors.accentText });
+        });
+      }
+      const hasAuthor = page.author && isVisible("author");
+      const hasDate = page.date && isVisible("date");
+      if (hasAuthor) add("author", page.author!, { ...content, y: 6.23, w: hasDate ? textWidth * 0.56 : textWidth, h: 0.3 }, { fontSize: 13 });
+      if (hasDate) {
+        const inset = hasAuthor ? textWidth * 0.6 : 0;
+        add("date", page.date!, { x: margin + inset, y: 6.23, w: textWidth - inset, h: 0.3 }, { fontSize: 13 });
+      }
+      if (page.extraInfo) add("extraInfo", page.extraInfo, { ...content, y: hasAuthor || hasDate ? 6.61 : 6.23, h: 0.3 }, { fontSize: 12 });
+      if (page.footer) add("footer", page.footer, { ...content, y: pageNumberBox.y,
+        w: Math.min(textWidth, pageNumberBox.x - margin - 0.2), h: pageNumberBox.h }, { fontSize: 10 });
+      return elements;
+    }
     add("title", page.title,
       { x: margin, y: imageBox || page.subtitle ? 1.52 : 2.48, w: textWidth, h: 2.55 },
       { bold: true, fontSize: coverTitleSize });
@@ -450,7 +550,10 @@ export function getSlideElements(
     });
   }
   const hasComparisonImage = page.layout === "image-comparison" && elements.length > 0;
-  for (const { key, ...element } of getSlideTextElements(page, colors, index, primaryImageBox, layout, hasComparisonImage)) {
+  const hasCoverLogo = page.layout === "cover" && Boolean(page.addedElements?.some(
+    (element) => element.type === "image" && element.role === "logo" && images.has(element.id),
+  ));
+  for (const { key, ...element } of getSlideTextElements(page, colors, index, primaryImageBox, layout, hasComparisonImage, hasCoverLogo)) {
     elements.push({ ...element, type: "text", id: templateElementId(page.slideId, key), templateKey: key });
   }
   for (const element of page.addedElements ?? []) {
@@ -516,15 +619,16 @@ export async function renderPresentation(
     const imageElements = elements.filter((element) => element.type === "image");
     for (const element of imageElements) {
       const image = images.get(element.id)!;
+      const format = image.bytes[0] === 0x89 ? "png" : "jpeg";
       const fit = element.templateKey ? getSlideImageFit(page, element.templateKey) : { fit: element.fit, position: "centre" as const };
       const bytes = fit
         ? await fitPresentationImage(sharp(image.bytes, { limitInputPixels: 16_000_000 }), image.box, {
           ...fit,
-          background: `#${imageBackground}`,
-        })
+          background: format === "png" ? "#00000000" : `#${imageBackground}`,
+        }, format)
         : image.bytes;
       slide.addImage({
-        data: `image/jpeg;base64,${Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")}`,
+        data: `image/${format};base64,${Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")}`,
         objectName: element.templateKey ?? element.id,
         ...image.box,
         altText: image.fallback ? "装饰插图" : element.description,

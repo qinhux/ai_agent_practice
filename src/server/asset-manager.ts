@@ -44,6 +44,10 @@ async function fallbackImage(width: number, height: number, index: number) {
   return sharp(Buffer.from(svg)).jpeg({ quality: 86 }).toBuffer();
 }
 
+export function buildPresentationImagePrompt(description: string, imageStyle: string, background: string, composition: string) {
+  return `${description}\n配图风格：${imageStyle}。\n幻灯片底色：#${background}。请让画面的光线、整体色调和边缘与该底色协调。\nNo captions or presentation layout. ${composition}`;
+}
+
 export async function preparePresentationImages(
   presentation: PresentationSource,
   signal?: AbortSignal,
@@ -66,6 +70,7 @@ export async function preparePresentationImages(
     while (nextIndex < jobs.length) {
       signal?.throwIfAborted();
       const { page, index, slot, brief, elementId } = jobs[nextIndex++];
+      const { background } = slideColors[index];
 
       const imageFocus = page.layout === "image-focus";
       const isComparison = slot.id !== "image";
@@ -84,9 +89,9 @@ export async function preparePresentationImages(
           const composition = coverStyle === "split-right"
             ? "Center the subject in the image with room for a slightly portrait crop."
             : wideCover
-              ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
+              ? "Use a wide landscape composition. Place the main subject on the right. Keep the left visually quiet and close in tone to the slide background for overlaid text."
               : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
-          const prompt = `${brief}. 配图风格：${theme.imageStyle}。No text, captions, or presentation layout. ${composition}`;
+          const prompt = buildPresentationImagePrompt(brief, theme.imageStyle, background, `No text. ${composition}`);
           const image = await generateImageAsset(prompt, aspectRatio, signal);
           const source = sharp(image);
           let box = plannedBox;
@@ -99,7 +104,7 @@ export async function preparePresentationImages(
           const bytes = await fitPresentationImage(source, box, {
             fit: slot.fit,
             position: isFirstSlide && !coverStyle && box === plannedBox ? "right" : "centre",
-            ...(imageFocus && { background: `#${legacyLayout ? theme.colors.modes.light.background : slideColors[index].background}` }),
+            ...(imageFocus && { background: `#${legacyLayout ? theme.colors.modes.light.background : background}` }),
           });
           images.set(elementId, { slideId: page.slideId, bytes, box, fallback: false });
           continue;

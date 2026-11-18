@@ -133,7 +133,7 @@ export async function planPresentation(
 ${themeInstructions}
 plan.title 最多 60 字，slides 恰好有 ${brief.slideCount} 项，按放映顺序排列。每页包含 layout、goal（最多 120 字）、keyPoints（1–5 条，每条最多 160 字）和 imageSlots。
 多页演示通常以 cover 开场。根据主题、受众和标题选择封面的 coverStyle，imageSlots 填 ["image"]。适合展现场景、氛围或全景时选 full-bleed，画面铺满全页，左侧预留标题区。适合突出单个产品、人物或需要独立文字区时选 split-right，左侧放文字，右侧为上下铺满的配图。其他版式省略 coverStyle。
-页面可通过 backgroundMode 指定 light 或 dark，用于响应用户的要求或有意突出某页。通常省略此字段，默认多页稿的封面和一句话收尾页用深色，其他页用浅色。
+每页默认继承 theme.defaultBackgroundMode。仅在用户指定某页的深浅模式，或长篇文稿需要突出章节过渡等少数页面时，才用 backgroundMode（light 或 dark）覆盖。用户要求全稿统一底色时，所有页面均沿用全稿模式。
 layout 从下表选择。根据内容选版式，避免重复。单页直接呈现核心内容。goal 描述本页叙事作用，keyPoints 概括要覆盖的材料。
 封面用 coverFields 数组列出本次要显示的可选字段，主标题必填，不列入数组。可用字段为 ${JSON.stringify([...available])}，必须使用的字段为 ${JSON.stringify([...required])}。有必用字段时，第一页必须采用封面版式。其余版式省略 coverFields。
 根据用户需求、主题和受众选择：正式汇报可用 eyebrow（场合或栏目）、author、date；品牌发布可用 logo、tagline（一句话主张）；项目速览或城市名片可用 metrics、extraInfo（地点或编号）或 keywords。description 用于简短背景，footer 用于系列名或版权。副标题、核心文案和描述选能补充标题的内容，默认最多用两项。必要字段优先，避免自动填满。仅在 coverDetails 中有明确资料时才可选对应字段。Logo 只使用用户附上的素材。

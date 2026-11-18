@@ -201,15 +201,21 @@ export type PresentationSource = z.infer<typeof presentationSourceSchema>;
 export type PresentationSlide = PresentationSource["slides"][number];
 type SlideColors = { background: string; text: string; accentText: string };
 
-export function getSlideAppearance(page: PresentationSlide, index: number, slideCount: number) {
+export function getSlideAppearance(
+  page: PresentationSlide, index: number, slideCount: number,
+  defaultBackgroundMode: ThemeSpec["defaultBackgroundMode"],
+) {
   const firstSlide = index === 0;
   const isCover = firstSlide && page.layout === "cover";
   const isClosing = index === slideCount - 1 && page.layout === "summary" &&
     page.closing === true && page.points.length === 1 && page.points[0].length <= 50;
+  const defaultDarkBackground = defaultBackgroundMode === undefined
+    ? slideCount > 1 && (isCover || isClosing)
+    : defaultBackgroundMode === "dark";
   return {
     firstSlide: page.appearance?.firstSlide ?? firstSlide,
     darkBackground: page.backgroundMode === undefined
-      ? page.appearance?.darkBackground ?? (slideCount > 1 && (isCover || isClosing))
+      ? page.appearance?.darkBackground ?? defaultDarkBackground
       : page.backgroundMode === "dark",
   };
 }
@@ -217,7 +223,7 @@ export function getSlideAppearance(page: PresentationSlide, index: number, slide
 export function getSlideColors({ slides, theme }: PresentationSource): SlideColors[] {
   const { modes, accent } = theme.colors;
   return slides.map((page, index) => {
-    const { darkBackground: useDarkBackground } = getSlideAppearance(page, index, slides.length);
+    const { darkBackground: useDarkBackground } = getSlideAppearance(page, index, slides.length, theme.defaultBackgroundMode);
     const { background, text, accentText } = modes[useDarkBackground ? "dark" : "light"];
     return { background, text, accentText: accentText ?? (contrastRatio(accent, background) >= 4.5 ? accent : text) };
   });
@@ -581,10 +587,12 @@ export function describeSlideElement(element: SlideElement) {
 }
 
 // DrawingML alpha represents opacity in thousandths of a percent.
-const imageGradientFill = '<a:gradFill rotWithShape="1"><a:gsLst>' +
-  '<a:gs pos="0"><a:srgbClr val="000000"><a:alpha val="60000"/></a:srgbClr></a:gs>' +
-  '<a:gs pos="100000"><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:gs>' +
-  '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
+function imageGradientFill(color: string) {
+  return '<a:gradFill rotWithShape="1"><a:gsLst>' +
+    `<a:gs pos="0"><a:srgbClr val="${color}"><a:alpha val="60000"/></a:srgbClr></a:gs>` +
+    `<a:gs pos="100000"><a:srgbClr val="${color}"><a:alpha val="0"/></a:srgbClr></a:gs>` +
+    '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>';
+}
 
 const pptxLayouts = { "16:9": "LAYOUT_WIDE" } as const;
 
@@ -598,7 +606,7 @@ export async function renderPresentation(
   pptx.layout = pptxLayouts[theme.aspectRatio];
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
-  const slidesWithGradient = new Set<string>();
+  const gradientColors = new Map<string, string>();
   const customFonts = new Map<string, FontPair>();
   const requiredColors = [...new Set((theme.colorRequirements?.roles ?? []).map((role) => theme.colors[role]))];
 
@@ -640,7 +648,8 @@ export async function renderPresentation(
           objectName: "渐变遮罩",
           line: { transparency: 100 },
         });
-        slidesWithGradient.add(`ppt/slides/slide${index + 1}.xml`);
+        // Themes saved before deck-wide backgrounds used a black overlay.
+        gradientColors.set(`ppt/slides/slide${index + 1}.xml`, theme.defaultBackgroundMode ? colors.background : "000000");
       }
     }
     if (page.layout === "steps") {
@@ -715,11 +724,12 @@ export async function renderPresentation(
         const font = customFonts.get(token);
         return font ? `<a:${script} typeface="${script === "ea" ? font.eastAsian : font.latin}"` : match;
       });
-    if (slidesWithGradient.has(part.name)) {
+    const gradientColor = gradientColors.get(part.name);
+    if (gradientColor) {
       // PptxGenJS cannot set a gradient fill on a shape through its public API.
       const maskFill = /(<p:sp><p:nvSpPr><p:cNvPr id="\d+" name="渐变遮罩">[\s\S]*?<\/a:prstGeom>)<a:noFill\/>/;
       if (!maskFill.test(xml)) throw new Error("Missing PowerPoint gradient mask shape.");
-      xml = xml.replace(maskFill, (_, shape: string) => shape + imageGradientFill);
+      xml = xml.replace(maskFill, (_, shape: string) => shape + imageGradientFill(gradientColor));
     }
     archive.file(part.name, xml);
   }));

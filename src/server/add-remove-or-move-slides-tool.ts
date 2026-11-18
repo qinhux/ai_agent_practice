@@ -126,8 +126,9 @@ export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: Presenta
             return { presentationId, changed: false, slides: directory };
           }
 
+          const { defaultBackgroundMode } = source.theme;
           const originalAppearances = new Map(source.slides.map((page, index) =>
-            [page.slideId, getSlideAppearance(page, index, source.slides.length)] as const));
+            [page.slideId, getSlideAppearance(page, index, source.slides.length, defaultBackgroundMode)] as const));
           const addedIds = new Set<string>();
           const remainingIds = new Set(slides.map(({ slideId }) => slideId));
           for (const [elementId, image] of images) {
@@ -139,7 +140,7 @@ export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: Presenta
               addedIds.add(page.slideId);
               return page;
             }
-            const current = getSlideAppearance(page, index, slides.length);
+            const current = getSlideAppearance(page, index, slides.length, defaultBackgroundMode);
             return current.firstSlide === original.firstSlide && current.darkBackground === original.darkBackground
               ? page : { ...page, appearance: original };
           });

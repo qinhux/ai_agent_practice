@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { generateText, Output, tool, type LanguageModel } from "ai";
 import sharp from "sharp";
 import { z } from "zod";
+import { buildPresentationImagePrompt } from "./asset-manager";
 import { getPrisma } from "./db";
 import { generateImageAsset, getCustomImageGenerationSize } from "./images";
 import {
@@ -359,9 +360,8 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 const generationSize = getCustomImageGenerationSize(imagePixelSize(box));
                 const aspect = box.w / box.h;
                 const fallbackRatio = fit.position === "right" || aspect > 4 / 3 ? "16:9" : aspect < 3 / 4 ? "9:16" : "1:1";
-                const firstSlide = revised[index].appearance?.firstSlide ?? index === 0;
-                const composition = firstSlide && layout?.fullSlide
-                  ? "Place the main subject on the right and leave the left visually quiet for slide text."
+                const composition = layout?.fullSlide
+                  ? "Place the main subject on the right. Keep the left visually quiet and close in tone to the slide background for overlaid text."
                   : fit.position === "right"
                     ? generationSize
                       ? "Center the main subject and leave breathing room around it."
@@ -370,7 +370,7 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 if (generationSize) fit.position = "centre";
                 description = source.prompt;
                 bytes = new Uint8Array(await generateImageAsset(
-                  `${description}. 配图风格：${theme.imageStyle}。No captions or presentation layout. ${composition}`,
+                  buildPresentationImagePrompt(description, theme.imageStyle, colors[index].background, composition),
                   generationSize ?? fallbackRatio, imageSignal,
                 ));
               }

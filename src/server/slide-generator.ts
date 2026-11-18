@@ -42,12 +42,12 @@ export async function generateSlides(
         }
       }),
   });
-  const pages = plan.slides.map(({ layout, goal, keyPoints, imageSlots, backgroundMode }, index) =>
-    ({ slideNumber: index + 1, layout, goal, keyPoints, imageSlots, backgroundMode }));
+  const pages = plan.slides.map(({ layout, goal, keyPoints, imageSlots, coverStyle, backgroundMode }, index) =>
+    ({ slideNumber: index + 1, layout, goal, keyPoints, imageSlots, coverStyle, backgroundMode }));
   const { slides } = await generatePresentationJson(options, "slide content", schema,
     `按照给定的 PowerPoint 大纲写出逐页内容。只返回 {"slides":[{"slideNumber":1,"content":{...}},...]}。按原顺序返回所有页，保留原页码和布局。
 content 使用以下结构：
-{"layout":"cover","title":"...","subtitle":"..."}
+{"layout":"cover","title":"...","subtitle":"...","imageBriefs":{"image":"..."}}
 {"layout":"bullets","title":"...","points":["..."]}
 {"layout":"two-columns","title":"...","left":{"heading":"...","points":["..."]},"right":{"heading":"...","points":["..."]}}
 {"layout":"summary","title":"...","points":["..."]}
@@ -65,7 +65,9 @@ image-comparison 左右图注各最多 80 字，分别描述对应图的含义�
 所有文本使用单行纯文本。按需求指定的语言和主题风格写作，忠实使用提供的材料，保留用户指定的精确文案，避免编造统计数据、引文或来源。`,
     JSON.stringify({ brief, title: plan.title, pages, theme }), signal);
   return slides.map(({ content }, index) => {
-    const { slideId, backgroundMode } = plan.slides[index];
-    return { ...content, slideId, backgroundMode };
+    const { slideId, backgroundMode, coverStyle } = plan.slides[index];
+    return content.layout === "cover"
+      ? { ...content, slideId, backgroundMode, coverStyle }
+      : { ...content, slideId, backgroundMode };
   });
 }

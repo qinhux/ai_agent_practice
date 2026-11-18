@@ -70,21 +70,27 @@ export async function preparePresentationImages(
       const imageFocus = page.layout === "image-focus";
       const isComparison = slot.id !== "image";
       const isFirstSlide = !isComparison && !imageFocus && (page.appearance?.firstSlide ?? index === 0);
-      const legacyBox = legacyLayout ? (isFirstSlide ? firstSlideSideImageBox : imageBoxes[page.layout]) : undefined;
-      const sideOrContentBox = slot.id === "image"
-        ? legacyBox ?? themedImageBox(page.layout, isFirstSlide, theme)
+      const coverStyle = page.layout === "cover" ? page.coverStyle : undefined;
+      const useCoverBox = isFirstSlide || Boolean(coverStyle);
+      const legacyBox = legacyLayout ? (useCoverBox ? firstSlideSideImageBox : imageBoxes[page.layout]) : undefined;
+      const plannedBox = coverStyle === "full-bleed" ? fullSlideImageBox
+        : slot.id === "image" ? legacyBox ?? themedImageBox(page.layout, useCoverBox, theme)
         : getComparisonImageBox(theme, slot.id);
       if (configured) {
         try {
-          const aspectRatio = isFirstSlide || imageFocus || isComparison || page.layout === "two-columns" ? "16:9" : "1:1";
-          const composition = isFirstSlide
-            ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
-            : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
+          const wideCover = useCoverBox && coverStyle !== "split-right";
+          const wideImage = wideCover || imageFocus || isComparison || page.layout === "two-columns";
+          const aspectRatio = wideImage ? "16:9" : "1:1";
+          const composition = coverStyle === "split-right"
+            ? "Center the subject in the image with room for a slightly portrait crop."
+            : wideCover
+              ? "Use a wide landscape composition. Place the main subject on the right and keep the left visually quiet."
+              : page.layout === "two-columns" ? "Keep the subject in the central horizontal band." : "";
           const prompt = `${brief}. 配图风格：${theme.imageStyle}。No text, captions, or presentation layout. ${composition}`;
           const image = await generateImageAsset(prompt, aspectRatio, signal);
           const source = sharp(image);
-          let box = sideOrContentBox;
-          if (isFirstSlide) {
+          let box = plannedBox;
+          if (isFirstSlide && !coverStyle) {
             const { width, height } = await source.metadata();
             const slideAspect = fullSlideImageBox.w / fullSlideImageBox.h;
             // Allow minor provider rounding (e.g. 1696 × 960 for a 16:9 request).
@@ -92,7 +98,7 @@ export async function preparePresentationImages(
           }
           const bytes = await fitPresentationImage(source, box, {
             fit: slot.fit,
-            position: isFirstSlide && box === sideOrContentBox ? "right" : "centre",
+            position: isFirstSlide && !coverStyle && box === plannedBox ? "right" : "centre",
             ...(imageFocus && { background: `#${legacyLayout ? theme.colors.modes.light.background : slideColors[index].background}` }),
           });
           images.set(elementId, { slideId: page.slideId, bytes, box, fallback: false });
@@ -102,11 +108,11 @@ export async function preparePresentationImages(
           console.warn("Presentation image unavailable:", error instanceof Error ? error.name : "UnknownError");
         }
       }
-      if (slot.required) continue;
-      const { width, height } = imagePixelSize(sideOrContentBox);
+      if (slot.required && page.layout !== "cover") continue;
+      const { width, height } = imagePixelSize(plannedBox);
       const bytes = await fallbackImage(width, height, index);
       images.set(elementId, {
-        slideId: page.slideId, bytes: new Uint8Array(bytes), box: sideOrContentBox, fallback: true,
+        slideId: page.slideId, bytes: new Uint8Array(bytes), box: plannedBox, fallback: true,
       });
     }
   }

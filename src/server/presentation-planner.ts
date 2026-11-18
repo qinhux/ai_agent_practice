@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { generatePresentationJson, type PresentationModelOptions } from "./presentation-json";
-import { getSlideImageSlots, imageSlotSchema, presentationTitleSchema, slideContentSchema } from "./presentations";
+import { coverStyleSchema, getSlideImageSlots, imageSlotSchema, presentationTitleSchema, slideContentSchema } from "./presentations";
 import { backgroundModeSchema, generatedThemeSpecSchema, themeInstructions } from "./theme-generator";
 
 const slideLayoutIds = slideContentSchema.options.map(({ shape }) => shape.layout.value);
@@ -67,8 +67,11 @@ const plannedSlideSchema = z.object({
   layout: z.literal(slideLayoutIds),
   goal: z.string().trim().min(1).max(120),
   keyPoints: z.array(z.string().trim().min(1).max(160)).min(1).max(5),
+  coverStyle: coverStyleSchema.optional(),
   imageSlots: z.array(imageSlotSchema),
   backgroundMode: backgroundModeSchema.optional(),
+}).refine((page) => (page.layout === "cover") === (page.coverStyle !== undefined), {
+  path: ["coverStyle"], message: "封面必须选择 full-bleed 或 split-right，其他版式省略 coverStyle。",
 }).refine(({ layout, imageSlots }) => {
   const slots = getSlideImageSlots(layout);
   const selected = new Set(imageSlots);
@@ -103,6 +106,7 @@ export async function planPresentation(
     `为目标受众策划 PowerPoint。只返回 {"theme":{...},"plan":{"title":"...","slides":[...]}}。
 ${themeInstructions}
 plan.title 最多 60 字，slides 恰好有 ${brief.slideCount} 项，按放映顺序排列。每页包含 layout、goal（最多 120 字）、keyPoints（1–5 条，每条最多 160 字）和 imageSlots。
+多页演示通常以 cover 开场。根据主题、受众和标题选择封面的 coverStyle，imageSlots 填 ["image"]。适合展现场景、氛围或全景时选 full-bleed，画面铺满全页，左侧预留标题区。适合突出单个产品、人物或需要独立文字区时选 split-right，左侧放文字，右侧为上下铺满的配图。其他版式省略 coverStyle。
 页面可通过 backgroundMode 指定 light 或 dark，用于响应用户的要求或有意突出某页。通常省略此字段，默认多页稿的封面和一句话收尾页用深色，其他页用浅色。
 layout 从下表选择。根据内容选版式，避免重复。单页直接呈现核心内容。goal 描述本页叙事作用，keyPoints 概括要覆盖的材料。
 

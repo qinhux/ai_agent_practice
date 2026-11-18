@@ -45,8 +45,9 @@ export const slideTextFields = {
 };
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
 const slideFields = { title, backgroundMode: backgroundModeSchema.optional(), imageBriefs };
+export const coverStyleSchema = z.enum(["full-bleed", "split-right"]);
 const slideLayoutSchema = z.discriminatedUnion("layout", [
-  z.object({ layout: z.literal("cover"), ...slideFields, subtitle: slideText(90).optional(), imageBrief }),
+  z.object({ layout: z.literal("cover"), ...slideFields, coverStyle: coverStyleSchema.optional(), subtitle: slideText(90).optional(), imageBrief }),
   // 要点列表页。这一页有一个标题，正文在同一栏里逐条列出，每条前面有一个圆点 •
   z.object({ layout: z.literal("bullets"), ...slideFields, points, imageBrief }),
   z.object({ layout: z.literal("two-columns"), ...slideFields, left: column, right: column, imageBrief }),
@@ -60,7 +61,7 @@ const slideLayoutSchema = z.discriminatedUnion("layout", [
 type ImageSlotSpec = { id: ImageSlot; required: boolean; fit: "cover" | "contain" };
 const optionalImage = [{ id: "image", required: false, fit: "cover" }] as const;
 const slideImageSlots = {
-  cover: optionalImage,
+  cover: [{ id: "image", required: true, fit: "cover" }],
   bullets: optionalImage,
   "two-columns": optionalImage,
   summary: optionalImage,
@@ -251,7 +252,7 @@ export function getComparisonImageBox(theme: ThemeSpec, slot: Exclude<ImageSlot,
 export function getSlideImageLayout(page: PresentationSlide, box?: ElementBox) {
   return page.imageLayout ?? {
     fullSlide: box?.w === slideSize.w && box.h === slideSize.h,
-    gradient: box?.y === 0 && box.h === slideSize.h,
+    gradient: box?.y === 0 && box.h === slideSize.h && !(page.layout === "cover" && page.coverStyle === "split-right"),
   };
 }
 

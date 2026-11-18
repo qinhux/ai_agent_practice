@@ -3,7 +3,7 @@ import pptxgen from "pptxgenjs";
 import sharp, { type ResizeOptions, type Sharp } from "sharp";
 import { z } from "zod";
 import {
-  backgroundModeSchema, contrastRatio, hexColor, legacyPaletteSchema, legacyStyleSchema,
+  backgroundModeSchema, contrastRatio, hexColor, legacyPaletteSchema, legacyStyleSchema, luminance,
   themeFont, themeSpecSchema, upgradeLegacyTheme, type FontPair, type ThemeSpec,
 } from "./theme-generator";
 
@@ -70,8 +70,25 @@ export const slideTextFields = {
   imageFocusPoints,
   imageCaption,
 };
+const keywordElementKeys = ["keyword1", "keyword2", "keyword3", "keyword4"] as const;
+export const textElementKeySchema = z.enum([
+  "title", ...z.object(coverTextFields).keyof().options, "point1", "point2", "point3", "point4",
+  ...keywordElementKeys,
+  "leftHeading", "leftPoint1", "leftPoint2", "leftPoint3",
+  "rightHeading", "rightPoint1", "rightPoint2", "rightPoint3",
+  "leftCaption", "rightCaption",
+  ...([1, 2, 3] as const).flatMap((slot) => [`metric${slot}Value`, `metric${slot}Label`, `metric${slot}Detail`] as const),
+  ...([1, 2, 3, 4, 5] as const).flatMap((slot) => [`step${slot}Marker`, `step${slot}Heading`, `step${slot}Detail`] as const),
+]);
+export type TextElementKey = z.infer<typeof textElementKeySchema>;
+export const highlightPhrasesSchema = z.array(slideText(50)).max(8).refine(
+  (phrases) => new Set(phrases).size === phrases.length, "强调短语不得重复。",
+);
+export const textHighlightsSchema = z.partialRecord(textElementKeySchema, highlightPhrasesSchema);
+
 // 一整页幻灯片。根据 layout 决定这页需要哪些字段。
-const slideFields = { title, backgroundMode: backgroundModeSchema.optional(), imageBriefs };
+const slideFields = { title, backgroundMode: backgroundModeSchema.optional(), imageBriefs,
+  textHighlights: textHighlightsSchema.optional() };
 export const coverStyleSchema = z.enum(["full-bleed", "split-right"]);
 const slideLayoutSchema = z.discriminatedUnion("layout", [
   z.object({ layout: z.literal("cover"), ...slideFields, ...coverCopySchema.shape, ...coverDetailsSchema.shape,
@@ -109,7 +126,44 @@ export function getSlideImageSlots(layout: keyof typeof slideImageSlots): readon
 export const slideContentSchema = slideLayoutSchema.refine(
   (page) => Object.keys(page.imageBriefs ?? {}).every((id) => getSlideImageSlots(page.layout).some((slot) => slot.id === id)),
   { path: ["imageBriefs"], message: "配图描述包含该版式不支持的槽位。" },
-);
+).superRefine((page, context) => {
+  for (const [key, phrases] of Object.entries(page.textHighlights ?? {})) {
+    const text = getTemplateText(page, key as TextElementKey);
+    if (phrases?.some((phrase) => !text?.includes(phrase))) {
+      context.addIssue({ code: "custom", path: ["textHighlights", key],
+        message: "强调短语必须逐字出现在对应的文本字段中。" });
+    }
+  }
+});
+
+export function getTemplateText(page: z.infer<typeof slideLayoutSchema>, key: TextElementKey): string | undefined {
+  if (key === "title") return page.title;
+  if (page.layout === "cover") {
+    if (Object.hasOwn(coverTextFields, key)) return page[key as keyof typeof coverTextFields];
+    const keyword = /^keyword([1-4])$/.exec(key);
+    if (keyword) return page.keywords?.[Number(keyword[1]) - 1];
+  }
+  const point = /^point([1-4])$/.exec(key);
+  if (point && "points" in page) return page.points[Number(point[1]) - 1];
+  if (page.layout === "two-columns") {
+    const column = /^(left|right)(Heading|Point([1-3]))$/.exec(key);
+    if (column) {
+      const side = page[column[1] as "left" | "right"];
+      return column[2] === "Heading" ? side.heading : side.points[Number(column[3]) - 1];
+    }
+  }
+  if (page.layout === "image-comparison" && (key === "leftCaption" || key === "rightCaption")) return page[key];
+  const metric = /^metric([1-3])(Value|Label|Detail)$/.exec(key);
+  if (metric && "metrics" in page) {
+    return page.metrics?.[Number(metric[1]) - 1]?.[metric[2].toLowerCase() as "value" | "label" | "detail"];
+  }
+  const step = /^step([1-5])(Marker|Heading|Detail)$/.exec(key);
+  if (step && page.layout === "steps") {
+    const item = page.steps[Number(step[1]) - 1];
+    return item?.[step[2].toLowerCase() as "marker" | "heading" | "detail"] ??
+      (item && step[2] === "Marker" ? step[1] : undefined);
+  }
+}
 
 export function getSlideImageBrief(page: z.infer<typeof slideContentSchema>, slot: ImageSlot) {
   return page.imageBriefs?.[slot] ?? (slot === "image" && "imageBrief" in page ? page.imageBrief : undefined);
@@ -123,17 +177,6 @@ export const textStyleSchema = z.strictObject({
   italic: z.boolean().optional(),
   align: z.enum(["left", "center", "right", "justify"]).optional(),
 });
-const keywordElementKeys = ["keyword1", "keyword2", "keyword3", "keyword4"] as const;
-export const textElementKeySchema = z.enum([
-  "title", ...z.object(coverTextFields).keyof().options, "point1", "point2", "point3", "point4",
-  ...keywordElementKeys,
-  "leftHeading", "leftPoint1", "leftPoint2", "leftPoint3",
-  "rightHeading", "rightPoint1", "rightPoint2", "rightPoint3",
-  "leftCaption", "rightCaption",
-  ...([1, 2, 3] as const).flatMap((slot) => [`metric${slot}Value`, `metric${slot}Label`, `metric${slot}Detail`] as const),
-  ...([1, 2, 3, 4, 5] as const).flatMap((slot) => [`step${slot}Marker`, `step${slot}Heading`, `step${slot}Detail`] as const),
-]);
-export type TextElementKey = z.infer<typeof textElementKeySchema>;
 export const elementBoxSchema = z.strictObject({
   x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(),
 });
@@ -326,6 +369,7 @@ type SlideTextElement = {
   style: z.infer<typeof textStyleSchema>;
   font?: FontPair;
   explicitFont?: string;
+  highlights?: string[];
   bullet?: { indent: number };
 };
 
@@ -359,9 +403,12 @@ function getSlideTextElements(
     const font = resolveFont(override?.fontFace, theme, key === "title" ? "title" : "body");
     elements.push({
       key, text, box: page.textBoxes?.[key] ?? box,
-      style: { color: colors.text, ...style, ...override, fontFace: font.latin },
+      style: { color: colors.text, ...style,
+        ...(page.textHighlights !== undefined && { color: colors.text }),
+        ...override, fontFace: font.latin },
       font,
       explicitFont: override?.fontFace,
+      highlights: override?.color ? undefined : page.textHighlights?.[key],
       bullet,
     });
   }
@@ -582,8 +629,85 @@ export function describeSlideElement(element: SlideElement) {
     const { id, type, box, description, fit } = element;
     return { id, type, box, description, fit };
   }
-  const { id, type, box, text, style } = element;
-  return { id, type, box, text, style };
+  const { id, type, box, text, style, highlights } = element;
+  return { id, type, box, text, style, highlights };
+}
+
+// Keep the original text box, bullet, and paragraph style; color only selected runs.
+function highlightedText(text: string, phrases: string[] | undefined, color: string): string | pptxgen.TextProps[] {
+  if (!phrases?.length) return text;
+  const spans = phrases.flatMap((phrase) => {
+    const matches: { start: number; end: number }[] = [];
+    for (let start = text.indexOf(phrase); start !== -1; start = text.indexOf(phrase, start + phrase.length)) {
+      matches.push({ start, end: start + phrase.length });
+    }
+    return matches;
+  }).sort((a, b) => a.start - b.start);
+  if (!spans.length) return text;
+  const merged: typeof spans = [];
+  for (const span of spans) {
+    const last = merged.at(-1);
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else merged.push({ ...span });
+  }
+  const runs: pptxgen.TextProps[] = [];
+  let position = 0;
+  for (const { start, end } of merged) {
+    if (start > position) runs.push({ text: text.slice(position, start) });
+    runs.push({ text: text.slice(start, end), options: { color } });
+    position = end;
+  }
+  if (position < text.length) runs.push({ text: text.slice(position) });
+  return runs;
+}
+
+type HeaderDecoration = { type: "rect" | "line"; name: string; box: ElementBox; color: string };
+
+function getSlideHeaderDecorations(
+  page: PresentationSlide, colors: SlideColors, elements: SlideElement[],
+  { theme, legacyLayout }: PresentationLayout,
+): HeaderDecoration[] {
+  if (legacyLayout || theme.headerStyle === "none") return [];
+  const title = elements.find((element) => element.type === "text" && element.templateKey === "title");
+  if (!title) return [];
+  const grid = getSlideGrid(theme.grid);
+  const isCover = page.layout === "cover";
+  const isClosing = page.layout === "summary" && page.closing === true &&
+    page.points.length === 1 && page.points[0].length <= 50;
+  const prominent = isCover || isClosing;
+  const color = [theme.colors.primary, theme.colors.accent, colors.accentText]
+    .find((candidate) => contrastRatio(candidate, colors.background) >= 3) ?? colors.text;
+  const neutral = luminance(colors.background) > 0.5 ? "D8DDE3" : "59616C";
+  const x = title.box.x;
+  const width = Math.min(title.box.w, slideSize.w - grid.margin - x);
+  const barWidth = isCover ? 1.15 : isClosing ? 0.95 : 0.65;
+  const decorations: HeaderDecoration[] = [{
+    type: "rect", name: "页眉主题色条", color,
+    box: { x, y: 0.27, w: Math.min(barWidth, width), h: prominent ? 0.1 : 0.07 },
+  }];
+  const fullSlideImage = elements.some((element) => element.type === "image" &&
+    element.templateKey === "image" && getSlideImageLayout(page, element.box).fullSlide);
+  if (prominent) {
+    decorations.push({
+      type: "line", name: "页眉短灰线", color: neutral,
+      box: { x: x + barWidth + 0.2, y: 0.32, w: Math.min(2.2, width - barWidth - 0.2), h: 0 },
+    });
+  } else if (!fullSlideImage) {
+    decorations.push({
+      type: "line", name: "标题内容分隔线", color: neutral,
+      box: { x, y: 1.65 + theme.spacing.elementGap / 144, w: width, h: 0 },
+    });
+  }
+  // An edited title, logo, or added object can occupy the otherwise reserved header band.
+  // Omit decorations in that case; background images are deliberately allowed underneath.
+  return decorations.filter(({ box }) => isOnSlide(box) && box.w > 0 && !elements.some((element) => {
+    if (element.type === "image" && element.templateKey === "image" &&
+      getSlideImageLayout(page, element.box).fullSlide) return false;
+    const other = element.box;
+    const clearance = 0.04;
+    return box.x < other.x + other.w + clearance && box.x + box.w > other.x - clearance &&
+      box.y < other.y + other.h + clearance && box.y + box.h > other.y - clearance;
+  }));
 }
 
 // DrawingML alpha represents opacity in thousandths of a percent.
@@ -652,6 +776,13 @@ export async function renderPresentation(
         gradientColors.set(`ppt/slides/slide${index + 1}.xml`, theme.defaultBackgroundMode ? colors.background : "000000");
       }
     }
+    for (const { type, name, box, color } of getSlideHeaderDecorations(page, colors, elements, presentation)) {
+      slide.addShape(type === "rect" ? pptx.ShapeType.rect : pptx.ShapeType.line, {
+        ...box, objectName: name,
+        fill: type === "rect" ? { color } : undefined,
+        line: type === "rect" ? { transparency: 100 } : { color, width: 0.75 },
+      });
+    }
     if (page.layout === "steps") {
       const markers = elements.filter((element) => element.type === "text" && /^step\dMarker$/.test(element.templateKey ?? ""));
       const { borderRadius, strokeWidth, strokeColorRole } = theme.shape;
@@ -688,8 +819,8 @@ export async function renderPresentation(
 
     for (const element of elements) {
       if (element.type !== "text") continue;
-      const { text, box, style, bullet, font, templateKey, id } = element;
-      slide.addText(text, {
+      const { text, box, style, bullet, font, templateKey, id, highlights } = element;
+      slide.addText(highlightedText(text, highlights, colors.accentText), {
         ...textOptions, ...box, ...style,
         fontFace: font ? customFontFace(font) : style.fontFace,
         objectName: templateKey ?? id, bullet,
@@ -723,6 +854,16 @@ export async function renderPresentation(
       .replace(/<a:(latin|ea|cs) typeface="(PptxCustomFont\d+)"/g, (match, script: string, token: string) => {
         const font = customFonts.get(token);
         return font ? `<a:${script} typeface="${script === "ea" ? font.eastAsian : font.latin}"` : match;
+      })
+      .replace(/<a:p>[\s\S]*?<\/a:p>/g, (paragraph) => {
+        // PptxGenJS emits a pPr per rich-text run. DrawingML permits only one;
+        // later buNone entries otherwise erase bullets when opened in Office/Impress.
+        let hasProperties = false;
+        return paragraph.replace(/<a:pPr\b[^>]*(?:\/>|>[\s\S]*?<\/a:pPr>)/g, (properties) => {
+          if (hasProperties) return "";
+          hasProperties = true;
+          return properties;
+        });
       });
     const gradientColor = gradientColors.get(part.name);
     if (gradientColor) {

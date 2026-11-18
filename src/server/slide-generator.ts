@@ -1,14 +1,17 @@
 import { z } from "zod";
 import { generatePresentationJson, type PresentationModelOptions } from "./presentation-json";
 import type { PresentationBrief, PresentationPlan } from "./presentation-planner";
-import { coverCopySchema, coverDetailsSchema, slideContentSchema, slideTextFields } from "./presentations";
+import { coverCopySchema, coverDetailsSchema, slideContentSchema, slideTextFields, textHighlightsSchema } from "./presentations";
 import type { ThemeSpec } from "./theme-generator";
 
 // Keep legacy slide parsing intact and enforce the renderer's limits on newly generated content.
 const generatedContentSchema = z.looseObject({
+  textHighlights: textHighlightsSchema.optional(),
   points: slideTextFields.points.optional(),
   left: z.looseObject({ points: slideTextFields.columnPoints }).optional(),
   right: z.looseObject({ points: slideTextFields.columnPoints }).optional(),
+}).refine((content) => content.textHighlights !== undefined, {
+  path: ["textHighlights"], message: "每页必须明确选择 textHighlights，不强调时填写 {}。",
 }).refine((content) => content.imageBrief === undefined, {
   path: ["imageBrief"], message: "新页面请使用 imageBriefs。",
 }).pipe(slideContentSchema);
@@ -70,6 +73,8 @@ steps 写 3–5 个有序节点，marker 用于日期或阶段标记，最多 12
 image-focus 写 1–2 条解读，每条最多 72 字，围绕图中可示意的主体或结构。
 image-comparison 左右图注各最多 80 字，分别描述对应图的含义，配图描述的风格和视角应便于对照。
 仅当最后一页是收尾用的 summary，且只有一条不超过 50 字的简短结论时，才添加 "closing":true。
+每页必须填写 textHighlights，由你根据本页信息层级决定是否用主题色强调关键词或关键短句。无需强调时填 {}；适合强调时通常选 1–3 处，避免整页或整段染色。所有文本保持原文，不添加 Markdown 或 HTML 标记，短语必须逐字出现在对应字段中，每条最多 50 字。
+textHighlights 示例：{"title":["核心优势"],"point1":["降低成本","提高效率"]}。键是渲染文本元素名：title；封面的 subtitle、eyebrow、tagline、description、keyword1–keyword4；单栏和图文解读的 point1–point4；双栏的 leftHeading、leftPoint1–leftPoint3、rightHeading、rightPoint1–rightPoint3；指标的 metric1Value、metric1Label、metric1Detail（同理到 metric3）；步骤的 step1Marker、step1Heading、step1Detail（同理到 step5）；双图的 leftCaption、rightCaption。仅使用本页实际存在且由你生成的文案字段，封面服务端补入的资料不要标注。省略的文字使用普通文字色，包括未被选中的封面关键词、指标和小标题；强调处由渲染器使用当前背景模式下的 theme.colors.modes.*.accentText，不自行指定 RGB。尊重用户指定或禁止强调的要求。
 为大纲 imageSlots 中的每个槽位填写 imageBriefs，键用槽位 ID，值是对应独立配图的主体和构图描述，每条最多 280 字。imageSlots 为空时省略 imageBriefs。配图避免出现文字、幻灯片文案或图表，避免把生成的场景描述为实拍证据。
 所有文本使用单行纯文本。按需求指定的语言和主题风格写作，忠实使用提供的材料，保留用户指定的精确文案，避免编造统计数据、引文或来源。`,
     JSON.stringify({ brief, title: plan.title, pages, theme }), signal);

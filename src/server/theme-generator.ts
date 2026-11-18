@@ -70,6 +70,7 @@ export const themeSpecSchema = z.object({
   defaultBackgroundMode: backgroundModeSchema.optional(),
   colors: z.object({ primary: hexColor, secondary: hexColor, accent: hexColor, modes: modesSchema }),
   colorRequirements: colorRequirementsSchema.optional(),
+  headerStyle: z.enum(["accent-rule", "none"]).default("accent-rule"),
   typography: typographySchema.prefault({}),
   grid: gridSchema.prefault({}),
   spacing: spacingSchema.prefault({}),
@@ -137,4 +138,5 @@ export const themeInstructions = `整份演示文稿使用同一个 theme。结�
 在规划主题时判断是否有需要贯穿每页的标志性颜色。核心主题具有明确、广为识别的品牌色，或用户明确要求每页出现指定颜色时，在 theme 中填写可选的 colorRequirements：{"roles":["primary","secondary"],"perSlide":"any"}。roles 引用 colors 中的 primary、secondary 或 accent，至少一项且不得重复；any 表示每页至少出现其中一种颜色，all 表示每页所有指定颜色都出现。指定角色保留原始品牌色，文字可通过 accentText 使用适合背景的色调。渲染器会在每页页脚绘制这些原始颜色的可见色条。
 例如，英伟达公司介绍将品牌绿设为 primary，填写 {"roles":["primary"],"perSlide":"any"}；麦当劳品牌介绍将红色、黄色设为 primary、secondary，通常填写 {"roles":["primary","secondary"],"perSlide":"any"}，用户要求每页同时出现两色时使用 all。普通城市介绍、行业介绍、知识科普等没有明确标志性颜色的主题通常省略 colorRequirements；科技联想到蓝色、环保联想到绿色等常见联想，以及正文偶然提及的品牌，都不足以触发每页必用规则。用户明确指定或取消每页颜色要求时优先遵从。
 页面比例固定 16:9，网格固定为 12 列，pageMargin 是左右页边距。除非需求明确需要调整，沿用示例中的字号和尺寸，单位为 pt。字体默认 Arial / Microsoft YaHei；经典风格可增加 titleFontFamily，使用 Georgia / Songti SC。shape.strokeColorRole 可用 primary、secondary 或 accent。
+页眉默认使用 headerStyle:"accent-rule"：左上角短横主题色条与标题、正文左对齐，正文标题下用中性灰细线分隔，封面和收尾页使用稍大的色条和短灰线。满版配图正文页省略长分隔线。色条优先使用 primary，背景对比不足时使用 accent 或当前模式的 accentText。用户要求无装饰或极简无页眉时设置 headerStyle:"none"。这些元素由渲染器统一绘制，配图描述中不要包含色条、分隔线或页眉。
 visualStyle 和 imageStyle 各最多 120 字。未指定配图风格时优先自然光、真实质感的写实摄影风格。`;

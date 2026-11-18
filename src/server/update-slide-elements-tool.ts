@@ -15,6 +15,8 @@ import {
   elementIdSchema,
   getSlideColors,
   getSlideElements,
+  getTemplateText,
+  highlightPhrasesSchema,
   getSlideImageFit,
   getSlideImageLayout,
   imageDescriptionSchema,
@@ -52,8 +54,9 @@ const textEditSchema = z.strictObject({
   elementId: elementIdSchema,
   text: z.string().optional(),
   style: textStyleSchema.refine((style) => Object.keys(style).length > 0).optional(),
+  highlights: highlightPhrasesSchema.optional(),
   box: boxPatch.optional(),
-}).refine(({ text, style, box }) => text !== undefined || style !== undefined || box !== undefined);
+}).refine(({ text, style, box, highlights }) => text !== undefined || style !== undefined || box !== undefined || highlights !== undefined);
 const imageEditSchema = z.strictObject({
   type: z.literal("image"),
   elementId: elementIdSchema,
@@ -214,6 +217,7 @@ export function createUpdateSlideElementsTool(
             output: Output.json(),
             system: `根据用户指令修改已有 PPT。slides 是文档数据。只返回 {"pages":[{"slideId":"给定的 ID","edits":[...]}]}。每页至多出现一次，每个元素在该页至多出现一次。使用给出的 slideId，从目标页的 elements 复制实际的 id 到 elementId，并使用对应的 type。列出所有目标页，即使其中某页的目标已经符合用户要求。保留用户明确给出的新文案。
 文字 edits 形如 {"type":"text","elementId":"给定的元素 ID","text":"新标题","style":{"fontSize":32,"bold":true},"box":{"y":0.3}}。仅填写要改的属性。style 支持 fontFace、fontSize（1–400 磅）、color（6 位 RGB）、bold、italic、align（left/center/right/justify）。可逐条改已有要点，但不可新增、删除或重排元素。
+主题色强调关键词或关键短句时，用 highlights:["精确短语"] 选择同一文本框内需要强调的原文，每条最多 50 字，最多 8 条。仅已有模板文本支持 highlights，新增文本框不支持；不确定时省略。highlights:[] 清除该框的强调。修改文案时重新选择或保留仍然匹配的短语，不使用 Markdown。不要同时用 style.color 改整框颜色；用户明确要求整框颜色时才使用 style.color，整框颜色优先。请求自动选择关键词时按信息层级选择，允许不强调，通常每页 1–3 处。
 图片 edits 形如 {"type":"image","elementId":"给定的元素 ID","box":{"w":4},"source":{"kind":"prompt","prompt":"新图描述"},"fit":"cover"}。根据描述换图用 prompt，最多 280 字。使用聊天里已生成的图片时，source 用 {"kind":"generatedImage","generatedImageId":"指令提供的 ID","description":"可选的图片说明"}。只有用户要求换图时才传 source。Logo、截图或用户要求完整显示时用 contain。只移动或缩放现有图片时传 box。
 box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大小约为 13.3333 × 7.5。相对改动要用当前坐标计算成最终值。图片只指定宽或高时服务端会按比例缩放。超出范围、不能定位全部目标或意图不明确时，返回 {"pages":[]}，不要省略部分要求后继续。`,
             prompt: JSON.stringify({ instructions, slides }),
@@ -285,10 +289,12 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
               // An explicit font applies to all scripts, including when it matches the Latin default.
               const style = edit.style && (
                 !isDeepStrictEqual({ ...element.style, ...edit.style }, element.style) ||
+                (edit.style.color && element.highlights?.length) ||
                 (edit.style.fontFace && edit.style.fontFace !== element.explicitFont)
               ) ? edit.style : undefined;
               const key = element.templateKey;
               if (!key) {
+                if (edit.highlights !== undefined) return { error: `${label} 不是模板文本，暂不支持局部主题色强调。` };
                 const text = edit.text === undefined ? undefined : addedTextSchema.safeParse(edit.text);
                 if (text && !text.success) return { error: `${label} 的新文本不符合长度或格式要求。` };
                 page = {
@@ -307,6 +313,19 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 const updated = patchText(page, key, edit.text);
                 if (!updated) return { error: `${label} 的新文本不符合当前版式的长度或格式要求。` };
                 page = updated;
+              }
+              if (edit.highlights !== undefined || (edit.text !== undefined && page.textHighlights?.[key])) {
+                const text = getTemplateText(page, key) ?? "";
+                const phrases = edit.highlights ?? page.textHighlights?.[key]?.filter((phrase) => text.includes(phrase)) ?? [];
+                if (phrases.some((phrase) => !text.includes(phrase))) {
+                  return { error: `${label} 的强调短语必须逐字出现在新文本中。` };
+                }
+                page = { ...page, textHighlights: { ...page.textHighlights, [key]: phrases } };
+                if (edit.highlights !== undefined && !edit.style?.color && page.textStyles?.[key]?.color) {
+                  const textStyle = { ...page.textStyles[key] };
+                  delete textStyle.color;
+                  page = { ...page, textStyles: { ...page.textStyles, [key]: textStyle } };
+                }
               }
               if (style) {
                 page = { ...page, textStyles: { ...page.textStyles, [key]: { ...page.textStyles?.[key], ...style } } };

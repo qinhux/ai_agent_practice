@@ -9,6 +9,8 @@ import { extractEvidence, bindCitationReferences, researchPresentation, validate
 import { presentationSourceSchema, getSlideColors, getSlideElements, getCitationBand, renderPresentation, templateElementId } from "../src/server/presentations.ts";
 import { PresentationDrafts } from "../src/server/presentation-drafts.ts";
 import { createPresentationTool } from "../src/server/presentation-tool.ts";
+import { createAddRemoveOrMoveSlidesTool } from "../src/server/add-remove-or-move-slides-tool.ts";
+import { createUpdateSpeakerNotesTool } from "../src/server/presentation-speaker-notes.ts";
 import { reviewPresentation } from "../src/server/presentation-visual-review.ts";
 import { preparePresentationDrafts } from "../src/server/save-presentation.ts";
 
@@ -263,7 +265,8 @@ test("generation writes content and citations in one pass without review or corr
     if (system.includes("制定资料搜索计划")) {
       stages.push("research"); output = { useWeb: false, queries: [] };
     } else if (system.includes("从给定来源提取")) {
-      stages.push("evidence"); output = { evidence: [{ sourceId: data.sources[0].id, claim: "2025年产值100亿元", quote: "2025 年示例地区产值为 100 亿元。" }] };
+      stages.push("evidence"); output = { evidence: [{ sourceId: data.sources[0].id, claim: "2025年产值100亿元",
+        quote: "2025 年示例地区产值为 100 亿元。", period: "2025年" }] };
     } else if (system.includes("为目标受众策划 PowerPoint")) {
       stages.push("outline"); output = { theme: { ...original.theme, defaultBackgroundMode: "light" },
         plan: { title: original.title, slides: [{ layout: "bullets", goal: "呈现产业发展", keyPoints: ["2025年产值100亿元"], imageSlots: [] }] } };
@@ -272,6 +275,13 @@ test("generation writes content and citations in one pass without review or corr
       output = { slides: [{ slideNumber: 1, content: { layout: "bullets", title: "产业概览", textHighlights: {},
         points: ["2025 年示例地区产值为 100 亿元。", "未核验的新指标999。"] },
         citations: [{ target: "point1", evidenceIds: [data.brief.research.evidence[0].id] }] }] };
+    } else if (system.includes("撰写演讲者可直接说出口的汇报讲稿")) {
+      stages.push("notes");
+      assert.equal(data.brief.durationSeconds, 60);
+      assert.equal(data.brief.audience, "项目团队");
+      assert.match(data.pages[0].content[1], /100 亿元/);
+      assert.equal(data.evidence[0].period, "2025年");
+      output = { notes: [{ slideNumber: 1, text: "我们先看 2025 年的数据。示例地区的产值为 100 亿元。" }] };
     } else throw new Error(`unexpected stage: ${system.slice(0, 80)}`);
     return { content: [{ type: "text", text: JSON.stringify(output) }], finishReason: { unified: "stop", raw: "stop" },
       usage: { inputTokens: { total: 10 }, outputTokens: { total: 10 } }, warnings: [] };
@@ -280,15 +290,82 @@ test("generation writes content and citations in one pass without review or corr
   const tool = createPresentationTool(model, drafts, undefined, {
     userText: "仅根据这些材料做一页PPT：2025 年示例地区产值为 100 亿元。", webResearch: new WebResearch("off"),
   });
-  const result = await tool.execute({ topic: "产业概览", slideCount: 1 }, { toolCallId: "test", messages: [] });
+  const result = await tool.execute({ topic: "产业概览", slideCount: 1, durationSeconds: 60, audience: "项目团队" },
+    { toolCallId: "test", messages: [] });
   assert.ok(result.presentationId, JSON.stringify(result));
-  assert.deepEqual(stages, ["research", "evidence", "outline", "content"]);
+  assert.deepEqual(stages, ["research", "evidence", "outline", "content", "notes"]);
   const source = drafts.get(result.presentationId).source;
   assert.equal(source.slides.length, 1);
   assert.match(source.slides[0].points[0], /100/);
   assert.match(source.slides[0].points[1], /999/);
   assert.equal(source.slides[0].citations.length, 1);
+  assert.match(source.slides[0].speakerNotes.text, /我们先看 2025 年的数据/);
   validatePresentationCitations(source);
+
+  stages.length = 0;
+  const optedOut = await tool.execute({ topic: "产业概览", slideCount: 1, includeSpeakerNotes: false },
+    { toolCallId: "opt-out", messages: [] });
+  assert.deepEqual(stages, ["research", "evidence", "outline", "content"]);
+  assert.equal(drafts.get(optedOut.presentationId).source.slides[0].speakerNotes, undefined);
+});
+
+test("speaker notes follow their slide, are marked after content edits, and can be rewritten individually", async () => {
+  const source = fixture();
+  const original = source.slides[0];
+  original.speakerNotes = { text: "原来的讲稿" };
+  const drafts = new PresentationDrafts("test");
+  const presentationId = drafts.create(source, new Map());
+  const context = { toolCallId: "test", messages: [] };
+  const model = modelFor(
+    { notes: [{ slideNumber: 2, text: "页码错误，应重试。" }] },
+    { notes: [{ slideNumber: 1, text: "新增页讲稿" }] },
+    { notes: [{ slideNumber: 2, text: "更新后的讲稿" }] },
+  );
+  const editSlides = createAddRemoveOrMoveSlidesTool("test", drafts, { model });
+  const added = await editSlides.execute({ mode: "edit", presentationId, operations: [{ op: "add",
+    position: { kind: "start" }, slides: [{ layout: "summary", title: "简报", points: ["先介绍背景。"] }],
+  }] }, context);
+  assert.equal(added.changed, true);
+  const [first, second] = drafts.get(presentationId).source.slides;
+  assert.equal(first.speakerNotes.text, "新增页讲稿");
+  assert.equal(second.slideId, original.slideId);
+  assert.deepEqual(second.speakerNotes, original.speakerNotes);
+
+  await drafts.edit(presentationId, undefined, async ({ source, stage }) => {
+    stage({ ...source, slides: [first, { ...second, textStyles: { title: { bold: true } } }] });
+    return { ok: true };
+  });
+  assert.deepEqual(drafts.get(presentationId).source.slides[1].speakerNotes, original.speakerNotes);
+  await drafts.edit(presentationId, undefined, async ({ source, stage }) => {
+    stage({ ...source, slides: [first, { ...source.slides[1], title: "更新过的产业概览" }] });
+    return { ok: true };
+  });
+  assert.deepEqual(drafts.get(presentationId).source.slides[1].speakerNotes, { text: "原来的讲稿", needsUpdate: true });
+
+  const editNotes = createUpdateSpeakerNotesTool({ model }, drafts);
+  const result = await editNotes.execute({ presentationId, slideNumbers: [2], instructions: "重写第二页讲稿。" }, context);
+  assert.deepEqual(result.updatedSlideNumbers, [2]);
+  const revised = presentationSourceSchema.parse(drafts.get(presentationId).source);
+  assert.deepEqual(revised.slides[0].speakerNotes, first.speakerNotes);
+  assert.deepEqual(revised.slides[1].speakerNotes, { text: "更新后的讲稿" });
+  assert.equal(revised.slides[1].title, "更新过的产业概览");
+  assert.deepEqual(revised.slides[1].citations, original.citations);
+  assert.equal(model.doGenerateCalls.length, 3);
+});
+
+test("PPTX stores the speaker script in notes for cited and uncited slides", async () => {
+  const source = fixture();
+  const first = source.slides[0];
+  first.speakerNotes = { text: "先介绍 A & B 的背景。\n接下来解释这组数据。" };
+  source.slides.push({ slideId: randomUUID(), layout: "summary", title: "下一步",
+    points: ["制定发展计划"], speakerNotes: { text: "最后谈谈下一步。" } });
+  const archive = await JSZip.loadAsync(await renderPresentation(source, getSlideColors(source), new Map()));
+  const notes = await archive.file("ppt/notesSlides/notesSlide1.xml").async("string");
+  assert.match(notes, /<a:t>先介绍 A &amp; B 的背景。<\/a:t>.*?<\/a:p><a:p>.*?<a:t>接下来解释这组数据。<\/a:t>/);
+  assert.match(notes, /接下来解释这组数据。.*引用详情.*原文：2025 年示例地区产值为 100 亿元/);
+  assert.match(await archive.file("ppt/notesSlides/notesSlide2.xml").async("string"), /最后谈谈下一步。/);
+  assert.doesNotMatch(await archive.file("ppt/slides/slide1.xml").async("string"), /接下来解释这组数据/);
+  assert.doesNotMatch(await archive.file("ppt/slides/slide2.xml").async("string"), /最后谈谈下一步/);
 });
 
 test("PPTX exports source links, per-content markers, original evidence notes, and a reserved source band", async () => {

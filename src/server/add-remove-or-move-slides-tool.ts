@@ -4,6 +4,8 @@ import { z } from "zod";
 import { preparePresentationImages } from "./asset-manager";
 import { getPrisma } from "./db";
 import type { PresentationDrafts } from "./presentation-drafts";
+import type { PresentationModelOptions } from "./presentation-json";
+import { writeSpeakerNotes } from "./presentation-speaker-notes";
 import {
   getSlideAppearance,
   getSlideImageBrief,
@@ -74,7 +76,7 @@ function slideDirectory(slides: readonly PresentationSlide[]) {
   return slides.map(({ slideId, title, layout }, index) => ({ slideId, slideNumber: index + 1, title, layout }));
 }
 
-export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: PresentationDrafts) {
+export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: PresentationDrafts, options: PresentationModelOptions) {
   return tool({
     description: "List whole slides or stage an ordered batch that adds, removes, and/or moves whole slides in a PowerPoint draft. List first to resolve the user's original page numbers or titles to stable slide IDs. For a new cover, choose coverStyle full-bleed for a scenic background or split-right for a focused subject, and supply imageBriefs.image. New metrics slides use 1–3 sourced values with units, steps use 3–5 ordered nodes, image-focus uses imageBriefs.image for an AI illustration and 1–2 observations, and image-comparison uses leftCaption, rightCaption and both imageBriefs.leftImage and imageBriefs.rightImage. Use currentSlideNumber only when the user explicitly refers to the order after earlier operations. All references within one operation are resolved before that operation changes the order.",
     inputSchema: slideOperationsInputSchema,
@@ -145,8 +147,11 @@ export function createAddRemoveOrMoveSlidesTool(userId: string, drafts: Presenta
               ? page : { ...page, appearance: original };
           });
 
-          const revised = { ...source, slides };
+          let revised = { ...source, slides };
           if (addedIds.size) {
+            if (source.slides.some((page) => page.speakerNotes)) {
+              revised = await writeSpeakerNotes(options, revised, {}, abortSignal, addedIds);
+            }
             const addedImages = await preparePresentationImages(revised, abortSignal, addedIds);
             for (const [elementId, image] of addedImages) images.set(elementId, image);
           }

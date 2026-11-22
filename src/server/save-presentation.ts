@@ -52,6 +52,7 @@ export async function preparePresentationDrafts(
   const prepared: {
     data: Prisma.PresentationUncheckedCreateInput;
     slideCount: number;
+    speakerNotesPageCount: number;
     fallbackImageCount: number;
     warnings: readonly string[];
   }[] = [];
@@ -65,6 +66,9 @@ export async function preparePresentationDrafts(
       layoutWarnings.unshift("已调整第 " + repairedPages.join("、") + " 页的排版并重新检查。");
     }
     if (!checked) layoutWarnings.push("排版检查未完成，PPT 仍可下载。");
+    const staleNotesPages = source.slides.flatMap((page, index) => page.speakerNotes?.needsUpdate ? [index + 1] : []);
+    const speakerNotesWarnings = staleNotesPages.length
+      ? [`第 ${staleNotesPages.join("、")} 页正文已修改，汇报讲稿待更新。`] : [];
     const missingImageWarnings = source.slides.flatMap((page, index) => {
       const missingSlots = getSlideImageSlots(page.layout).filter(({ id }) => {
         const elementId = templateElementId(page.slideId, id);
@@ -81,21 +85,24 @@ export async function preparePresentationDrafts(
         images: { create: Array.from(images, ([elementId, image]) => ({ elementId, ...image })) },
       },
       slideCount: source.slides.length,
+      speakerNotesPageCount: source.slides.filter((page) => page.speakerNotes).length,
       fallbackImageCount: new Set([...images.values()].filter((image) => image.fallback).map((image) => image.slideId)).size,
-      warnings: [...new Set([...missingImageWarnings, ...warnings, ...(source.research?.warnings ?? []), ...layoutWarnings])],
+      warnings: [...new Set([...missingImageWarnings, ...speakerNotesWarnings, ...warnings, ...(source.research?.warnings ?? []), ...layoutWarnings])],
     });
   }
   return async (transaction: Prisma.TransactionClient) => {
     const files: FileDeliveryData["files"] = [];
-    for (const { data, slideCount, fallbackImageCount, warnings } of prepared) {
+    for (const { data, slideCount, speakerNotesPageCount, fallbackImageCount, warnings } of prepared) {
       abortSignal.throwIfAborted();
       const { id, title } = await transaction.presentation.create({ data, select: { id: true, title: true } });
+      const details = [`${slideCount} 页`];
+      if (speakerNotesPageCount) details.push(speakerNotesPageCount === slideCount ? "含汇报讲稿" : `${speakerNotesPageCount} 页含汇报讲稿`);
       files.push({
         id,
         kind: "presentation",
         name: `${title}.pptx`,
         downloadUrl: `/api/presentations/${encodeURIComponent(id)}`,
-        details: `${slideCount} 页`,
+        details: details.join(" · "),
         warnings: fallbackImageCount ? [`${fallbackImageCount} 页使用了备用配图`, ...warnings] : [...warnings],
       });
     }

@@ -1,7 +1,8 @@
+import { isDeepStrictEqual } from "node:util";
 import { DraftStore } from "./draft-store";
 import { loadPresentationForEdit, preparePresentationDrafts, type PresentationDraft } from "./save-presentation";
 import type { PresentationImage, PresentationSource } from "./presentations";
-import { removeStaleCitations, validatePresentationCitations } from "./presentation-research";
+import { citationTargets, removeStaleCitations, validatePresentationCitations } from "./presentation-research";
 import { ResearchError } from "./research-schema";
 import type { PresentationModelOptions } from "./presentation-json";
 
@@ -52,7 +53,17 @@ export class PresentationDrafts {
         },
       });
       if (staged && !("error" in result)) {
-        const next = removeStaleCitations(staged.source);
+        let next = removeStaleCitations(staged.source);
+        if (next.slides.some((page) => page.speakerNotes && !page.speakerNotes.needsUpdate)) {
+          const previousText = new Map(citationTargets(draft.source).map(({ slideId, elements }) => [slideId, elements]));
+          const currentText = citationTargets(next);
+          next = { ...next, slides: next.slides.map((page, index) => {
+            const original = previousText.get(page.slideId);
+            return page.speakerNotes && !page.speakerNotes.needsUpdate && original &&
+              !isDeepStrictEqual(original, currentText[index].elements)
+              ? { ...page, speakerNotes: { ...page.speakerNotes, needsUpdate: true } } : page;
+          }) };
+        }
         validatePresentationCitations(next);
         stage({ ...staged, source: next });
       }

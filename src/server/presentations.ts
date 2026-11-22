@@ -212,6 +212,9 @@ export type AddedSlideElement = z.infer<typeof addedElementSchema>;
 export const presentationTitleSchema = slideText(60);
 
 export const maxSlideCount = 12;
+export const maxSpeakerNotesLength = 1600;
+export const speakerNotesTextSchema = z.string().transform((text) => text.replace(/\r\n?/g, "\n").trim())
+  .pipe(z.string().min(1).max(maxSpeakerNotesLength).regex(/^(?:[^\p{Cc}\p{Cs}\uFFFE\uFFFF]|\n)+$/u));
 
 const presentationPagesSchema = z.object({
   title: presentationTitleSchema,
@@ -219,6 +222,7 @@ const presentationPagesSchema = z.object({
   slides: z.array(slideContentSchema.and(z.object({
     slideId: z.uuid(),
     citations: z.array(slideCitationSchema).max(50).optional(),
+    speakerNotes: z.object({ text: speakerNotesTextSchema, needsUpdate: z.literal(true).optional() }).optional(),
     // Preserve the original position-dependent styling when an existing slide is reordered.
     appearance: z.object({ firstSlide: z.boolean(), darkBackground: z.boolean() }).optional(),
     textStyles: z.partialRecord(textElementKeySchema, textStyleSchema).optional(),
@@ -899,6 +903,11 @@ export async function renderPresentation(
       });
     }
     const citedSources = getSlideCitationSources(page, presentation);
+    const notes: string[] = [];
+    if (page.speakerNotes) {
+      const { text, needsUpdate } = page.speakerNotes;
+      notes.push(needsUpdate ? `汇报讲稿（待更新）\n${text}` : text);
+    }
     if (citedSources.length) {
       const band = getCitationBand(page, presentation);
       const grid = getSlideGrid(theme.grid);
@@ -917,15 +926,17 @@ export async function renderPresentation(
           ...(source.url && { hyperlink: { url: source.url, tooltip: source.title } }),
         });
       });
-      const notes = citedSources.map((source, index) => {
+      const sourceNotes = citedSources.map((source, index) => {
         const details = (page.citations ?? []).flatMap((citation) => citation.evidenceIds.flatMap((id) => {
           const evidence = presentation.research?.evidence.find((item) => item.id === id && item.sourceId === source.id);
           return evidence ? [`对应内容：${citation.text}\n原文：${evidence.quote}\n位置：${evidence.location ?? "正文摘录"}\n统计时期：${evidence.period ?? "未注明"}\n适用范围：${evidence.scope ?? "见原文"}${citation.derivation ? `\n计算或推导：${citation.derivation}` : ""}`] : [];
         }));
         return `[${index + 1}] ${source.title}\n机构：${source.publisher ?? "用户材料"}\n链接：${source.url ?? "无公开链接，未独立核实"}\n发布日期：${source.publishedAt ?? "未注明"}\n访问时间：${source.accessedAt}\n${details.join("\n\n")}`;
       });
-      slide.addNotes(notes.join("\n\n"));
+      if (page.speakerNotes) notes.push("引用详情");
+      notes.push(...sourceNotes);
     }
+    if (notes.length) slide.addNotes(notes.join("\n\n"));
     if (requiredColors.length) {
       const bestContrastColor = requiredColors.reduce((best, color) =>
         contrastRatio(color, colors.background) > contrastRatio(best, colors.background) ? color : best);
@@ -946,6 +957,17 @@ export async function renderPresentation(
   if (!Buffer.isBuffer(bytes)) throw new TypeError("Expected PowerPoint output as a Node buffer.");
 
   const archive = await JSZip.loadAsync(bytes);
+  await Promise.all(presentation.slides.map(async (page, index) => {
+    if (!page.speakerNotes) return;
+    const part = archive.file(`ppt/notesSlides/notesSlide${index + 1}.xml`);
+    if (!part) throw new Error("Missing PowerPoint speaker notes.");
+    const xml = (await part.async("string")).replace(
+      /(<a:p><a:r><a:rPr[^>]*\/><a:t>)([^<]*)(<\/a:t><\/a:r><a:endParaRPr[^>]*\/><\/a:p>)/,
+      // PptxGenJS puts all notes in one text run. DrawingML uses paragraphs for visible line breaks.
+      (_, start: string, text: string, end: string) => text.split(/\r?\n/).map((line) => start + line + end).join(""),
+    );
+    archive.file(part.name, xml);
+  }));
   await Promise.all(archive.file(/^ppt\/slides\/slide\d+\.xml$/).map(async (part) => {
     // Keep legacy East Asian defaults and resolve per-script fonts for themed and edited text.
     let xml = (await part.async("string"))

@@ -193,11 +193,13 @@ function Chat() {
                   );
                 }
                 if (part.type === "tool-generatePresentation" || part.type === "tool-updateSlideElements" ||
+                    part.type === "tool-updateSpeakerNotes" ||
                     part.type === "tool-addOrRemoveSlideElements" || part.type === "tool-addRemoveOrMoveSlides" ||
                     part.type === "tool-updateTextElement" ||
                     part.type === "tool-editPresentation" || part.type === "tool-replaceImageElement") {
                   const isEdit = part.type !== "tool-generatePresentation";
-                  const action = part.type === "tool-addRemoveOrMoveSlides"
+                  const action = part.type === "tool-updateSpeakerNotes" ? "撰写汇报讲稿"
+                    : part.type === "tool-addRemoveOrMoveSlides"
                     ? part.input?.mode === "list" ? "查询 PPT 页面" : "调整 PPT 页面"
                     : part.type === "tool-replaceImageElement" ? "替换 PPT 配图" : isEdit ? "修改 PPT" : "研究资料并生成 PPT";
                   if (part.state === "output-available" && !("error" in part.output)) {

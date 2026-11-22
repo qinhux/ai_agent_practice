@@ -18,6 +18,9 @@ COPY . .
 RUN npm run build
 
 FROM base AS app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-impress poppler-utils fonts-noto-cjk fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000
 COPY --from=build --chown=node:node /app/.next/standalone ./
 COPY --from=build --chown=node:node /app/.next/static ./.next/static

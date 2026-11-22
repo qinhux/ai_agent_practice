@@ -1,14 +1,14 @@
 import { getPrisma } from "./db";
 import type { Prisma } from "@/generated/prisma/client";
 import type { FileDeliveryData } from "@/lib/file-delivery";
+import type { PresentationModelOptions } from "./presentation-json";
 import { validatePresentationCitations } from "./presentation-research";
+import { reviewPresentation } from "./presentation-visual-review";
 import {
   elementBoxSchema,
-  getSlideColors,
   getSlideImageBrief,
   getSlideImageSlots,
   presentationSourceSchema,
-  renderPresentation,
   templateElementId,
   type PresentationImage,
   type PresentationSource,
@@ -47,6 +47,7 @@ export async function preparePresentationDrafts(
   userId: string,
   drafts: Iterable<PresentationDraft>,
   abortSignal: AbortSignal,
+  model?: PresentationModelOptions,
 ) {
   const prepared: {
     data: Prisma.PresentationUncheckedCreateInput;
@@ -54,10 +55,16 @@ export async function preparePresentationDrafts(
     fallbackImageCount: number;
     warnings: readonly string[];
   }[] = [];
-  for (const { source, images, parentId, warnings } of drafts) {
+  for (const { source: draft, images: draftImages, parentId, warnings } of drafts) {
     abortSignal.throwIfAborted();
-    validatePresentationCitations(source);
-    const bytes = await renderPresentation(source, getSlideColors(source), images);
+    validatePresentationCitations(draft);
+    const { source, images, bytes, checked, issues, repairedPages } =
+      await reviewPresentation(draft, draftImages, abortSignal, { model });
+    const layoutWarnings = issues.map(({ page, message }) => "第 " + page + " 页 · " + message);
+    if (repairedPages.length) {
+      layoutWarnings.unshift("已调整第 " + repairedPages.join("、") + " 页的排版并重新检查。");
+    }
+    if (!checked) layoutWarnings.push("排版检查未完成，PPT 仍可下载。");
     const missingImageWarnings = source.slides.flatMap((page, index) => {
       const missingSlots = getSlideImageSlots(page.layout).filter(({ id }) => {
         const elementId = templateElementId(page.slideId, id);
@@ -75,7 +82,7 @@ export async function preparePresentationDrafts(
       },
       slideCount: source.slides.length,
       fallbackImageCount: new Set([...images.values()].filter((image) => image.fallback).map((image) => image.slideId)).size,
-      warnings: [...new Set([...missingImageWarnings, ...warnings, ...(source.research?.warnings ?? [])])],
+      warnings: [...new Set([...missingImageWarnings, ...warnings, ...(source.research?.warnings ?? []), ...layoutWarnings])],
     });
   }
   return async (transaction: Prisma.TransactionClient) => {

@@ -144,6 +144,11 @@ function Chat() {
                 if (part.type === "data-file-error") {
                   return <p key={index} role="status" className="text-sm text-destructive">{part.data}</p>;
                 }
+                if (part.type === "tool-completeFileWork" && part.state === "output-available" && part.output.ready &&
+                    busy && message === messages.at(-1) && !message.parts.some(({ type }) =>
+                      type === "data-files" || type === "data-file-error")) {
+                  return <p key={index} role="status" className="text-xs text-muted-foreground">正在检查 PPT 排版并准备下载…</p>;
+                }
                 if (part.type === "tool-getCurrentTime") {
                   return (
                     <p key={index} className="flex items-center gap-2 text-xs text-muted-foreground">

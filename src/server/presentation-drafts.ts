@@ -3,6 +3,7 @@ import { loadPresentationForEdit, preparePresentationDrafts, type PresentationDr
 import type { PresentationImage, PresentationSource } from "./presentations";
 import { removeStaleCitations, validatePresentationCitations } from "./presentation-research";
 import { ResearchError } from "./research-schema";
+import type { PresentationModelOptions } from "./presentation-json";
 
 export class PresentationDrafts {
   private readonly drafts: DraftStore<PresentationDraft>;
@@ -62,7 +63,7 @@ export class PresentationDrafts {
     });
   }
 
-  prepareSave(abortSignal: AbortSignal) {
-    return preparePresentationDrafts(this.userId, this.drafts.values(), abortSignal);
+  prepareSave(abortSignal: AbortSignal, model?: PresentationModelOptions) {
+    return preparePresentationDrafts(this.userId, this.drafts.values(), abortSignal, model);
   }
 }

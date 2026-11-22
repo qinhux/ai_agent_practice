@@ -13,6 +13,7 @@ import {
   describeSlideElement,
   elementBoxSchema,
   elementIdSchema,
+  getImageBox,
   getSlideColors,
   getSlideElements,
   getTemplateText,
@@ -24,6 +25,7 @@ import {
   imageNeedsUpscaling,
   imagePixelSize,
   isOnSlide,
+  patchTextLayout,
   setSlideImageBrief,
   slideNumberSchema,
   slideTextFields,
@@ -171,13 +173,6 @@ function patchText(page: PresentationSlide, key: TextElementKey, value: string):
   }
 }
 
-function getImageBox(current: ElementBox, patch: ImageEdit["box"]): ElementBox {
-  const box = { ...current, ...patch };
-  if (patch?.w !== undefined && patch.h === undefined) box.h = current.h * (box.w / current.w);
-  if (patch?.h !== undefined && patch.w === undefined) box.w = current.w * (box.h / current.h);
-  return box;
-}
-
 export function createUpdateSlideElementsTool(
   model: LanguageModel, userId: string, drafts: PresentationDrafts, providerOptions: ProviderOptions,
 ) {
@@ -297,16 +292,11 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                 if (edit.highlights !== undefined) return { error: `${label} 不是模板文本，暂不支持局部主题色强调。` };
                 const text = edit.text === undefined ? undefined : addedTextSchema.safeParse(edit.text);
                 if (text && !text.success) return { error: `${label} 的新文本不符合长度或格式要求。` };
-                page = {
+                page = patchTextLayout({
                   ...page,
                   addedElements: page.addedElements?.map((added) => added.id === element.id && added.type === "text"
-                    ? {
-                      ...added,
-                      text: text?.data ?? added.text,
-                      box: box ?? added.box,
-                      ...(style && { style: { ...added.style, ...style } }),
-                    } : added),
-                };
+                    ? { ...added, text: text?.data ?? added.text } : added),
+                }, element, box, style);
                 continue;
               }
               if (edit.text !== undefined) {
@@ -327,12 +317,8 @@ box 的 x、y 是左上角坐标，w、h 是宽和高，单位英寸，页面大
                   page = { ...page, textStyles: { ...page.textStyles, [key]: textStyle } };
                 }
               }
-              if (style) {
-                page = { ...page, textStyles: { ...page.textStyles, [key]: { ...page.textStyles?.[key], ...style } } };
-              }
-              if (box && !isDeepStrictEqual(box, element.box)) {
-                page = { ...page, textBoxes: { ...page.textBoxes, [key]: box } };
-              }
+              if (box || style) page = patchTextLayout(page, element,
+                box && !isDeepStrictEqual(box, element.box) ? box : undefined, style);
             }
             if (!isDeepStrictEqual(page, source.slides[index])) changedPages.add(index + 1);
             revised[index] = page;

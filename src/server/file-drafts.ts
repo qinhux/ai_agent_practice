@@ -2,12 +2,13 @@ import type { Prisma } from "@/generated/prisma/client";
 import type { FileDeliveryData } from "@/lib/file-delivery";
 import { getPrisma } from "./db";
 import { PresentationDrafts } from "./presentation-drafts";
+import type { PresentationModelOptions } from "./presentation-json";
 
 type SaveDrafts = (transaction: Prisma.TransactionClient) => Promise<FileDeliveryData["files"]>;
 
 type DraftManager = {
   readonly hasChanges: boolean;
-  prepareSave: (signal: AbortSignal) => Promise<SaveDrafts>;
+  prepareSave: (signal: AbortSignal, model?: PresentationModelOptions) => Promise<SaveDrafts>;
 };
 
 function createDraftManagers(userId: string) {
@@ -31,12 +32,12 @@ export class FileDrafts {
     return Object.values(this.managers).some((manager) => manager.hasChanges);
   }
 
-  async save(signal: AbortSignal): Promise<FileDeliveryData["files"]> {
+  async save(signal: AbortSignal, model?: PresentationModelOptions): Promise<FileDeliveryData["files"]> {
     const prepared: SaveDrafts[] = [];
     for (const manager of Object.values(this.managers)) {
       if (manager.hasChanges) {
         signal.throwIfAborted();
-        prepared.push(await manager.prepareSave(signal));
+        prepared.push(await manager.prepareSave(signal, model));
       }
     }
     if (!prepared.length) return [];

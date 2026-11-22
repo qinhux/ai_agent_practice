@@ -6,9 +6,11 @@ import JSZip from "jszip";
 import { MockLanguageModelV3 } from "ai/test";
 import { WebResearch } from "../src/server/web-research.ts";
 import { extractEvidence, bindCitationReferences, researchPresentation, validatePresentationCitations } from "../src/server/presentation-research.ts";
-import { presentationSourceSchema, getSlideColors, getSlideElements, getCitationBand, renderPresentation } from "../src/server/presentations.ts";
+import { presentationSourceSchema, getSlideColors, getSlideElements, getCitationBand, renderPresentation, templateElementId } from "../src/server/presentations.ts";
 import { PresentationDrafts } from "../src/server/presentation-drafts.ts";
 import { createPresentationTool } from "../src/server/presentation-tool.ts";
+import { reviewPresentation } from "../src/server/presentation-visual-review.ts";
+import { preparePresentationDrafts } from "../src/server/save-presentation.ts";
 
 function modelFor(...outputs) {
   return new MockLanguageModelV3({ doGenerate: outputs.map((output) => ({
@@ -313,4 +315,155 @@ test("PPTX exports source links, per-content markers, original evidence notes, a
     await mkdir(process.env.PPT_RESEARCH_PREVIEW_DIR, { recursive: true });
     await writeFile(`${process.env.PPT_RESEARCH_PREVIEW_DIR}/research-preview.pptx`, bytes);
   }
+});
+
+function renderedWords(source, omittedKey) {
+  const colors = getSlideColors(source);
+  return source.slides.map((slide, index) =>
+    getSlideElements(slide, colors[index], index, new Map(), source)
+      .filter(({ type, templateKey }) => type === "text" && (omittedKey === undefined || templateKey !== omittedKey))
+      .map(({ text, box }) => ({ text, box: { ...box, w: 0.2, h: 0.1 } })));
+}
+
+test("visual review adopts one verified text repair with the same content and citations", async () => {
+  const source = fixture();
+  let renders = 0;
+  const result = await reviewPresentation(source, new Map(), new AbortController().signal, { readLayout: async () =>
+    renderedWords(source, ++renders === 1 ? "title" : undefined) });
+  assert.equal(renders, 2);
+  assert.deepEqual(result.repairedPages, [1]);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.source.slides[0].title, source.slides[0].title);
+  assert.deepEqual(result.source.slides[0].citations, source.slides[0].citations);
+  assert.ok(result.source.slides[0].textBoxes?.title || result.source.slides[0].textStyles?.title?.fontSize);
+  validatePresentationCitations(result.source);
+  const archive = await JSZip.loadAsync(result.bytes);
+  assert.match(await archive.file("ppt/slides/slide1.xml").async("string"), /产业发展概览/);
+});
+
+test("visual review keeps the original when a second render still has problems, or the renderer is unavailable", async () => {
+  const source = fixture();
+  const signal = new AbortController().signal;
+  const attempts = [];
+  const unchanged = await reviewPresentation(source, new Map(), signal, { readLayout: async (bytes) => {
+    attempts.push(bytes);
+    return renderedWords(source, "title");
+  } });
+  assert.equal(attempts.length, 2);
+  assert.equal(unchanged.source, source);
+  assert.equal(unchanged.bytes, attempts[0]);
+  assert.equal(unchanged.checked, true);
+  assert.match(unchanged.issues[0].message, /未完整匹配/);
+  assert.deepEqual(unchanged.repairedPages, []);
+
+  const unavailable = await reviewPresentation(source, new Map(), signal, { readLayout: async () => {
+    throw new Error("Renderer unavailable");
+  } });
+  assert.equal(unavailable.source, source);
+  assert.equal(unavailable.checked, false);
+  assert.ok(unavailable.bytes.length > 0);
+  assert.deepEqual(unavailable.issues, []);
+});
+
+test("visual review leaves an explicitly positioned textbox in place and reports its page", async () => {
+  const source = fixture();
+  source.slides[0].textBoxes = { title: { x: 0.6, y: 0.45, w: 8, h: 0.5 } };
+  let renders = 0;
+  const result = await reviewPresentation(source, new Map(), new AbortController().signal, { readLayout: async () => {
+    renders++;
+    return renderedWords(source, "title");
+  } });
+  assert.equal(renders, 1);
+  assert.equal(result.source, source);
+  assert.deepEqual(result.issues.map(({ page }) => page), [1]);
+});
+
+test("visual review reports overlapping rendered text without moving user-positioned boxes", async () => {
+  const source = fixture();
+  const box = { x: 0.7, y: 0.5, w: 8, h: 0.7 };
+  source.slides[0].textBoxes = { title: box, point2: box };
+  const result = await reviewPresentation(source, new Map(), new AbortController().signal, { readLayout: async () =>
+    renderedWords(source) });
+  assert.equal(result.source, source);
+  assert.deepEqual(result.issues.map(({ page }) => page), [1]);
+  assert.match(result.issues[0].message, /可能重叠/);
+});
+
+test("the model proposes explicit text and image adjustments for the affected slide", async () => {
+  const source = fixture();
+  const { slideId, title, citations } = source.slides[0];
+  source.slides[0].imageBriefs = { image: "示例图" };
+  const imageId = templateElementId(slideId, "image");
+  const titleId = templateElementId(slideId, "title");
+  const initialBox = { x: 0.5, y: 0.4, w: 2, h: 1 };
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
+  const images = new Map([[imageId, { slideId, bytes: png, box: initialBox, fallback: false }]]);
+  const model = modelFor({ pages: [{ slideId, edits: [
+    { elementId: titleId, box: { w: 5.3 } },
+    { elementId: imageId, box: { x: 8, w: 3 } },
+  ] }] });
+  const result = await reviewPresentation(source, images, new AbortController().signal, {
+    model: { model }, readLayout: async () => renderedWords(source),
+  });
+  assert.equal(model.doGenerateCalls.length, 1);
+  assert.deepEqual(result.repairedPages, [1]);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.source.slides[0].textBoxes.title.w, 5.3);
+  assert.equal(result.source.slides[0].title, title);
+  assert.deepEqual(result.source.slides[0].citations, citations);
+  assert.deepEqual(result.images.get(imageId).box, { x: 8, y: 0.4, w: 3, h: 1.5 });
+  assert.deepEqual(images.get(imageId).box, initialBox);
+});
+
+test("a repair plan cannot change manually positioned text or target a clean slide", async () => {
+  const source = fixture();
+  const { slideId } = source.slides[0];
+  source.slides[0].textBoxes = { title: { x: 0.6, y: 0.45, w: 8, h: 0.5 } };
+  const clean = { ...source.slides[0], slideId: randomUUID() };
+  source.slides.push(clean);
+  const signal = new AbortController().signal;
+  for (const id of [slideId, clean.slideId]) {
+    const model = modelFor({ pages: [{ slideId: id, edits: [
+      { elementId: templateElementId(id, "title"), box: { x: 1 } },
+    ] }] });
+    let renders = 0;
+    const result = await reviewPresentation(source, new Map(), signal, {
+      model: { model }, async readLayout() {
+        renders++;
+        return [renderedWords(source, "title")[0], renderedWords(source)[1]];
+      },
+    });
+    assert.equal(model.doGenerateCalls.length, 1);
+    assert.equal(result.source, source);
+    assert.equal(renders, 1);
+    assert.deepEqual(result.repairedPages, []);
+    assert.deepEqual(result.issues.map(({ page }) => page), [1]);
+  }
+});
+
+test("LibreOffice and Poppler review the rendered text in a dense Chinese revision", {
+  skip: !process.env.PPT_VISUAL_INTEGRATION,
+}, async () => {
+  const source = fixture();
+  source.slides[0].textHighlights = { title: ["产业发展"], point1: ["100 亿元"] };
+  const longPoint = "这条说明包含相对密集的中文正文与不同的数字口径，需要在同一段里保留单位和统计时期。";
+  source.slides.push({
+    slideId: randomUUID(), layout: "two-columns",
+    title: "这是一个用来验证中文换行和多栏排版的较长页面标题",
+    left: { heading: "左栏重点", points: [longPoint, "集中说明左栏负责的环节", "确认所有原始统计时期与单位"] },
+    right: { heading: "右栏重点", points: ["这里展示右栏情况", "说明实施条件与预期变化", "梳理各项任务的执行顺序"] },
+  });
+  const id = randomUUID();
+  const parentId = randomUUID();
+  const save = await preparePresentationDrafts("account", [{ source, images: new Map(), parentId, warnings: [] }],
+    new AbortController().signal);
+  const result = await save({ presentation: { async create({ data }) {
+    assert.equal(data.parentId, parentId);
+    assert.equal(data.userId, "account");
+    assert.deepEqual(data.source.slides[0].citations, source.slides[0].citations);
+    assert.equal(data.bytes[0], 0x50);
+    assert.equal(data.bytes[1], 0x4b);
+    return { id, title: data.title };
+  } } });
+  assert.deepEqual(result[0].warnings, []);
 });

@@ -172,7 +172,7 @@ export async function POST(request: Request) {
 
         if (confirmed && !toolFailed) {
           try {
-            const files = await drafts.save(signal);
+            const files = await drafts.save(signal, { model, providerOptions });
             writer.write({ type: "data-files", data: files });
           } catch (error) {
             if (!signal.aborted) {

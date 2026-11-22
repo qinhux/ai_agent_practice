@@ -594,10 +594,35 @@ function resolveFont(explicit: string | undefined, theme: ThemeSpec, role: "titl
   return themeFont(theme, role);
 }
 
-type SlideElement =
+export type SlideElement =
   | ({ type: "text"; id: string; templateKey?: TextElementKey }
     & Omit<SlideTextElement, "key">)
   | { type: "image"; id: string; templateKey?: ImageSlot; box: ElementBox; description?: string; fit: "cover" | "contain" };
+
+export function patchTextLayout(
+  page: PresentationSlide,
+  element: Extract<SlideElement, { type: "text" }>,
+  box?: ElementBox,
+  style?: SlideTextElement["style"],
+): PresentationSlide {
+  const key = element.templateKey;
+  if (key) return {
+    ...page,
+    ...(box && { textBoxes: { ...page.textBoxes, [key]: box } }),
+    ...(style && { textStyles: { ...page.textStyles, [key]: { ...page.textStyles?.[key], ...style } } }),
+  };
+  return { ...page, addedElements: page.addedElements?.map((added) =>
+    added.type === "text" && added.id === element.id
+      ? { ...added, box: box ?? added.box, ...(style && { style: { ...added.style, ...style } }) }
+      : added) };
+}
+
+export function getImageBox(current: ElementBox, patch?: Partial<ElementBox>): ElementBox {
+  const box = { ...current, ...patch };
+  if (patch?.w !== undefined && patch.h === undefined) box.h = current.h * (box.w / current.w);
+  if (patch?.h !== undefined && patch.w === undefined) box.w = current.w * (box.h / current.h);
+  return box;
+}
 
 export function getSlideElements(
   page: PresentationSlide,

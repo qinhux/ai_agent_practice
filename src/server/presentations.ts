@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import pptxgen from "pptxgenjs";
 import sharp, { type ResizeOptions, type Sharp } from "sharp";
 import { z } from "zod";
+import { addedContentStep, addSlideRevealAnimations, textRevealStep } from "./presentation-animations";
 import { presentationResearchSchema, ResearchError, slideCitationSchema } from "./research-schema";
 import {
   backgroundModeSchema, contrastRatio, hexColor, legacyPaletteSchema, legacyStyleSchema, luminance,
@@ -218,6 +219,7 @@ export const speakerNotesTextSchema = z.string().transform((text) => text.replac
 
 const presentationPagesSchema = z.object({
   title: presentationTitleSchema,
+  revealOnClick: z.boolean().optional(),
   research: presentationResearchSchema.optional(),
   slides: z.array(slideContentSchema.and(z.object({
     slideId: z.uuid(),
@@ -796,6 +798,7 @@ export async function renderPresentation(
   pptx.title = presentation.title;
   const textOptions = { fontFace: "Arial", margin: 0, valign: "middle", fit: "shrink" } as const;
   const gradientColors = new Map<string, string>();
+  const slideReveals = new Map<string, string[][]>();
   const customFonts = new Map<string, FontPair>();
   const requiredColors = [...new Set((theme.colorRequirements?.roles ?? []).map((role) => theme.colors[role]))];
 
@@ -810,12 +813,22 @@ export async function renderPresentation(
 
   for (const [index, page] of presentation.slides.entries()) {
     const slide = pptx.addSlide();
+    const slidePath = `ppt/slides/slide${index + 1}.xml`;
+    const revealSteps = new Map<number, string[]>();
+    const footerNames = ["页码"];
+    function reveal(step: number, name: string) {
+      if (!presentation.revealOnClick) return;
+      const names = revealSteps.get(step);
+      if (names) names.push(name);
+      else revealSteps.set(step, [name]);
+    }
     const colors = slideColors[index];
     const imageBackground = legacyLayout ? theme.colors.modes.light.background : colors.background;
     slide.background = { color: colors.background };
     const elements = getSlideElements(page, colors, index, images, presentation);
     const imageElements = elements.filter((element) => element.type === "image");
     for (const element of imageElements) {
+      const name = element.templateKey ?? element.id;
       const image = images.get(element.id)!;
       const format = image.bytes[0] === 0x89 ? "png" : "jpeg";
       const fit = element.templateKey ? getSlideImageFit(page, element.templateKey) : { fit: element.fit, position: "centre" as const };
@@ -827,10 +840,16 @@ export async function renderPresentation(
         : image.bytes;
       slide.addImage({
         data: `image/${format};base64,${Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")}`,
-        objectName: element.templateKey ?? element.id,
+        objectName: name,
         ...image.box,
         altText: image.fallback ? "装饰插图" : element.description,
       });
+      if (element.templateKey === "rightImage") reveal(2, name);
+      if (element.templateKey === "leftImage" || page.layout === "image-focus" && element.templateKey === "image") reveal(1, name);
+      if (!element.templateKey) {
+        const logo = page.addedElements?.some((item) => item.id === element.id && item.type === "image" && item.role === "logo");
+        reveal(logo ? 0 : addedContentStep, name);
+      }
       if (element.templateKey === "image" && getSlideImageLayout(page, image.box).gradient) {
         slide.addShape(pptx.ShapeType.rect, {
           ...image.box,
@@ -838,10 +857,12 @@ export async function renderPresentation(
           line: { transparency: 100 },
         });
         // Themes saved before deck-wide backgrounds used a black overlay.
-        gradientColors.set(`ppt/slides/slide${index + 1}.xml`, theme.defaultBackgroundMode ? colors.background : "000000");
+        gradientColors.set(slidePath, theme.defaultBackgroundMode ? colors.background : "000000");
+        if (page.layout === "image-focus") reveal(1, "渐变遮罩");
       }
     }
-    for (const { type, name, box, color } of getSlideHeaderDecorations(page, colors, elements, presentation)) {
+    const headerDecorations = getSlideHeaderDecorations(page, colors, elements, presentation);
+    for (const { type, name, box, color } of headerDecorations) {
       slide.addShape(type === "rect" ? pptx.ShapeType.rect : pptx.ShapeType.line, {
         ...box, objectName: name,
         fill: type === "rect" ? { color } : undefined,
@@ -849,16 +870,19 @@ export async function renderPresentation(
       });
     }
     if (page.layout === "steps") {
-      const markers = elements.filter((element) => element.type === "text" && /^step\dMarker$/.test(element.templateKey ?? ""));
+      const markers = elements.filter((element) => element.type === "text")
+        .filter((element) => /^step\dMarker$/.test(element.templateKey ?? ""));
       const { borderRadius, strokeWidth, strokeColorRole } = theme.shape;
       const strokeColor = theme.colors[strokeColorRole];
       const color = contrastRatio(strokeColor, colors.background) >= 3 ? strokeColor : colors.text;
       const line = { color, width: strokeWidth };
       if (!legacyLayout) {
-        for (const { box } of markers) {
+        for (const { box, templateKey } of markers) {
+          const name = `步骤标记边框-${templateKey}`;
           slide.addShape(borderRadius ? pptx.ShapeType.roundRect : pptx.ShapeType.rect, {
-            ...box, objectName: "步骤标记边框", rectRadius: Math.min(borderRadius / 72, box.h / 2, box.w / 2), line,
+            ...box, objectName: name, rectRadius: Math.min(borderRadius / 72, box.h / 2, box.w / 2), line,
           });
+          reveal(textRevealStep(page.layout, templateKey), name);
         }
       }
       for (const [index, marker] of markers.slice(1).entries()) {
@@ -868,7 +892,9 @@ export async function renderPresentation(
         const y = from.y + from.h / 2;
         const w = to.x - x - 0.08;
         if (w <= 0 || Math.abs(y - to.y - to.h / 2) > 0.02) continue;
-        slide.addShape(pptx.ShapeType.line, { x, y, w, h: 0, line });
+        const name = `步骤连线-${marker.templateKey}`;
+        slide.addShape(pptx.ShapeType.line, { x, y, w, h: 0, line, objectName: name });
+        reveal(textRevealStep(page.layout, marker.templateKey), name);
       }
     }
     const imageOverlapsPageNumber = imageElements.some(({ box }) =>
@@ -901,7 +927,9 @@ export async function renderPresentation(
         fontFace: font ? customFontFace(font) : style.fontFace,
         objectName: templateKey ?? id, bullet,
       });
+      reveal(textRevealStep(page.layout, templateKey), templateKey ?? id);
     }
+    for (const { name } of headerDecorations) reveal(0, name);
     const citedSources = getSlideCitationSources(page, presentation);
     const notes: string[] = [];
     if (page.speakerNotes) {
@@ -918,13 +946,15 @@ export async function renderPresentation(
           ? new Date(source.publishedAt).toISOString().slice(0, 10) : source.publishedAt;
         const label = source.kind === "user" ? source.title : [source.publisher && short(source.publisher, 10),
           short(source.title, band.columns === 1 ? 45 : 16), date && short(date, 10)].filter(Boolean).join(" · ");
+        const name = `引用来源-${number + 1}`;
         slide.addText(`来源 [${number + 1}] ${label}`, {
           x: grid.margin + number % band.columns * trackWidth, y: band.y + Math.floor(number / band.columns) * 0.24,
           w: trackWidth - 0.12, h: 0.23, fontSize: 10, margin: 0, valign: "middle",
           color: colors.text, fill: { color: colors.background },
-          fontFace: customFontFace(themeFont(theme, "body")), objectName: `引用来源-${number + 1}`,
+          fontFace: customFontFace(themeFont(theme, "body")), objectName: name,
           ...(source.url && { hyperlink: { url: source.url, tooltip: source.title } }),
         });
+        footerNames.push(name);
       });
       const sourceNotes = citedSources.map((source, index) => {
         const details = (page.citations ?? []).flatMap((citation) => citation.evidenceIds.flatMap((id) => {
@@ -944,12 +974,20 @@ export async function renderPresentation(
       // Draw last so full-slide images and edited elements cannot cover the required colors.
       for (const [colorIndex, color] of footerColors.entries()) {
         const outline = contrastRatio(color, "FFFFFF") >= contrastRatio(color, "000000") ? "FFFFFF" : "000000";
+        const name = `主题必用色-${color}`;
         slide.addShape(pptx.ShapeType.rect, {
           x: theme.grid.pageMargin / 72 + colorIndex * 0.85, y: 7.12, w: 0.75, h: 0.1,
-          objectName: `主题必用色-${color}`,
+          objectName: name,
           fill: { color }, line: { color: outline, width: 0.5 },
         });
+        footerNames.push(name);
       }
+    }
+    const groups = [...revealSteps].sort(([left], [right]) => left - right).map(([, names]) => names);
+    const lastGroup = groups.at(-1);
+    if (lastGroup) {
+      lastGroup.push(...footerNames);
+      slideReveals.set(slidePath, groups);
     }
   }
 
@@ -994,6 +1032,8 @@ export async function renderPresentation(
       if (!maskFill.test(xml)) throw new Error("Missing PowerPoint gradient mask shape.");
       xml = xml.replace(maskFill, (_, shape: string) => shape + imageGradientFill(gradientColor));
     }
+    const revealGroups = slideReveals.get(part.name);
+    if (revealGroups) xml = addSlideRevealAnimations(xml, revealGroups);
     archive.file(part.name, xml);
   }));
 

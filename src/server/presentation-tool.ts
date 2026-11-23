@@ -31,12 +31,13 @@ export function createPresentationTool(
       language: z.string().trim().min(1).max(60).optional().describe("Requested language or the user's language"),
       durationSeconds: z.number().int().positive().optional().describe("Total presentation duration in seconds, only when specified by the user"),
       includeSpeakerNotes: z.boolean().optional().describe("Defaults to true. Set false only when the user opts out of speaker notes."),
+      revealOnClick: z.boolean().optional().describe("Defaults to true. Set false when the user wants slides to appear all at once without animation."),
       context: z.string().trim().min(1).max(6000).optional().describe("Brief summary of relevant source material and user requirements, including any requested visual style, brand colors, or image preferences. Leave slide writing and palette design to the tool."),
       coverDetails: coverDetailsSchema.optional().describe("Verbatim cover facts from the user's source: presenter/team, date, metrics (value with units, label, optional detail), extra information such as location, and a series/copyright footer. Omit unavailable facts."),
       requiredCoverFields: z.array(coverFieldSchema).max(coverFieldSchema.options.length).optional()
         .describe("Only optional cover fields the user explicitly requires on the cover. An attached cover Logo is handled automatically."),
     }),
-    execute: async ({ slideCount = defaultSlideCount, durationSeconds, includeSpeakerNotes = true, ...brief }, { abortSignal }) => {
+    execute: async ({ slideCount = defaultSlideCount, durationSeconds, includeSpeakerNotes = true, revealOnClick = true, ...brief }, { abortSignal }) => {
       try {
         const options = { model, providerOptions };
         const normalize = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/g, "");
@@ -65,7 +66,7 @@ export function createPresentationTool(
         const researchedRequest = { ...request, research };
         const { theme, plan } = await planPresentation(options, researchedRequest, abortSignal);
         const slides = await generateSlides(options, researchedRequest, plan, theme, abortSignal);
-        let source: PresentationSource = { title: plan.title, theme, slides, research };
+        let source: PresentationSource = { title: plan.title, theme, slides, research, revealOnClick };
         if (includeSpeakerNotes) {
           source = await writeSpeakerNotes(options, source, {
             audience: brief.audience, language: brief.language, durationSeconds, instructions: brief.context,

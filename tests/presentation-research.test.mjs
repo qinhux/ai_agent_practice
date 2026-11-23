@@ -3,10 +3,11 @@ import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
 import JSZip from "jszip";
+import sharp from "sharp";
 import { MockLanguageModelV3 } from "ai/test";
 import { WebResearch } from "../src/server/web-research.ts";
 import { extractEvidence, bindCitationReferences, researchPresentation, validatePresentationCitations } from "../src/server/presentation-research.ts";
-import { presentationSourceSchema, getSlideColors, getSlideElements, getCitationBand, renderPresentation, templateElementId } from "../src/server/presentations.ts";
+import { presentationSourceSchema, getSlideColors, getSlideElements, getCitationBand, renderPresentation, slideSize, templateElementId } from "../src/server/presentations.ts";
 import { PresentationDrafts } from "../src/server/presentation-drafts.ts";
 import { createPresentationTool } from "../src/server/presentation-tool.ts";
 import { createAddRemoveOrMoveSlidesTool } from "../src/server/add-remove-or-move-slides-tool.ts";
@@ -296,6 +297,7 @@ test("generation writes content and citations in one pass without review or corr
   assert.deepEqual(stages, ["research", "evidence", "outline", "content", "notes"]);
   const source = drafts.get(result.presentationId).source;
   assert.equal(source.slides.length, 1);
+  assert.equal(source.revealOnClick, true);
   assert.match(source.slides[0].points[0], /100/);
   assert.match(source.slides[0].points[1], /999/);
   assert.equal(source.slides[0].citations.length, 1);
@@ -303,10 +305,12 @@ test("generation writes content and citations in one pass without review or corr
   validatePresentationCitations(source);
 
   stages.length = 0;
-  const optedOut = await tool.execute({ topic: "产业概览", slideCount: 1, includeSpeakerNotes: false },
+  const optedOut = await tool.execute({ topic: "产业概览", slideCount: 1, includeSpeakerNotes: false, revealOnClick: false },
     { toolCallId: "opt-out", messages: [] });
   assert.deepEqual(stages, ["research", "evidence", "outline", "content"]);
-  assert.equal(drafts.get(optedOut.presentationId).source.slides[0].speakerNotes, undefined);
+  const staticSource = drafts.get(optedOut.presentationId).source;
+  assert.equal(staticSource.slides[0].speakerNotes, undefined);
+  assert.equal(staticSource.revealOnClick, false);
 });
 
 test("speaker notes follow their slide, are marked after content edits, and can be rewritten individually", async () => {
@@ -368,6 +372,53 @@ test("PPTX stores the speaker script in notes for cited and uncited slides", asy
   assert.doesNotMatch(await archive.file("ppt/slides/slide2.xml").async("string"), /最后谈谈下一步/);
 });
 
+test("PowerPoint click animations reveal cover and body content by region", async () => {
+  const source = fixture();
+  source.revealOnClick = true;
+  source.slides.unshift({ slideId: randomUUID(), layout: "cover", coverStyle: "full-bleed", title: "产业概览",
+    subtitle: "年度汇报", keywords: ["产业", "规划"], imageBriefs: { image: "城市背景图" } });
+  source.slides.push({ slideId: randomUUID(), layout: "two-columns", title: "两种方案",
+    left: { heading: "方案一", points: ["优先启动"] }, right: { heading: "方案二", points: ["分阶段启动"] } });
+  source.slides.push({ slideId: randomUUID(), layout: "steps", title: "执行流程",
+    steps: ["准备", "实施", "总结"].map((heading) => ({ heading, detail: heading + "阶段" })) });
+  const { slideId } = source.slides[0];
+  const png = await sharp({ create: { width: 16, height: 9, channels: 3, background: "#17324D" } }).png().toBuffer();
+  const images = new Map([[templateElementId(slideId, "image"), { slideId, bytes: png,
+    box: { x: 0, y: 0, ...slideSize }, fallback: false }]]);
+  const parsed = presentationSourceSchema.parse(source);
+  const archive = await JSZip.loadAsync(await renderPresentation(parsed, getSlideColors(parsed), images));
+
+  async function groupsFor(page) {
+    const xml = await archive.file(`ppt/slides/slide${page}.xml`).async("string");
+    const shapes = new Map(Array.from(xml.matchAll(/<p:cNvPr id="(\d+)" name="([^"]*)"/g), ([, id, name]) => [id, name]));
+    const groups = [];
+    for (const [, trigger, id] of xml.matchAll(/nodeType="(clickEffect|withEffect)"[\s\S]*?<p:spTgt spid="(\d+)"/g)) {
+      assert.ok(shapes.has(id));
+      if (trigger === "clickEffect") groups.push([]);
+      groups.at(-1).push(shapes.get(id));
+    }
+    assert.match(xml, /nodeType="mainSeq"/);
+    assert.match(xml, /evt="onNext"/);
+    assert.match(xml, /name="页码"/);
+    return groups;
+  }
+  const contentGroups = (groups) => groups.map((group) => group.filter((name) => !/^(页眉|标题内容分隔线)/.test(name)));
+  const coverGroups = await groupsFor(1);
+  assert.deepEqual(contentGroups(coverGroups),
+    [["title", "subtitle"], ["keyword1", "keyword2", "页码"]]);
+  assert.match(await archive.file("ppt/slides/slide1.xml").async("string"), /name="image"/);
+  const bodyGroups = await groupsFor(2);
+  assert.deepEqual(contentGroups(bodyGroups),
+    [["title"], ["point1"], ["point2", "页码", "引用来源-1"]]);
+  assert.deepEqual(contentGroups(await groupsFor(3)),
+    [["title"], ["leftHeading", "leftPoint1"], ["rightHeading", "rightPoint1", "页码"]]);
+  const steps = await groupsFor(4);
+  assert.equal(steps.length, 4);
+  assert.ok(steps[1].includes("步骤标记边框-step1Marker"));
+  assert.ok(steps[2].includes("步骤连线-step2Marker"));
+  assert.ok(steps[3].includes("step3Detail"));
+});
+
 test("PPTX exports source links, per-content markers, original evidence notes, and a reserved source band", async () => {
   const source = fixture();
   source.slides.push({ ...structuredClone(source.slides[0]), slideId: randomUUID(), backgroundMode: "dark" });
@@ -382,6 +433,7 @@ test("PPTX exports source links, per-content markers, original evidence notes, a
   const xml = await zip.file("ppt/slides/slide1.xml").async("string");
   const rels = await zip.file("ppt/slides/_rels/slide1.xml.rels").async("string");
   const notes = await zip.file("ppt/notesSlides/notesSlide1.xml").async("string");
+  assert.doesNotMatch(xml, /<p:timing>/);
   assert.match(xml, /来源 \[1\]/);
   assert.match(xml, /\[1\]/);
   assert.match(rels, /https:\/\/example.org\/report\?a=1&amp;b=2/);
@@ -522,6 +574,7 @@ test("LibreOffice and Poppler review the rendered text in a dense Chinese revisi
   skip: !process.env.PPT_VISUAL_INTEGRATION,
 }, async () => {
   const source = fixture();
+  source.revealOnClick = true;
   source.slides[0].textHighlights = { title: ["产业发展"], point1: ["100 亿元"] };
   const longPoint = "这条说明包含相对密集的中文正文与不同的数字口径，需要在同一段里保留单位和统计时期。";
   source.slides.push({

@@ -41,6 +41,7 @@ export function createToolRegistry(
       tools: pptTools,
       instructions: `创建新的 PowerPoint 时，调用 generatePresentation，并传入相关的对话上下文。该工具会按本轮搜索模式自行研究资料、标注来源并生成插图，无需在外层重复搜索。只有在用户指定页数时才传入 slideCount。必须保留用户“不要联网”“仅根据材料”等限制，以及指定的统计时期。工具返回的研究状态和质量提示须如实传达。不要自行补写来源或声称所有事实已经人工核实。
 新建 PPT 默认逐页生成演讲者讲稿。用户指定总汇报时长时换算成秒传给 durationSeconds，明确不要讲稿时才将 includeSpeakerNotes 设为 false。需要在已有 PPT 中添加或重写讲稿时调用 updateSpeakerNotes，只改指定页时传入当前页码。若同一轮还需修改正文或调整页序，先完成这些修改，再撰写讲稿。保留用户对讲稿的受众、时长、语言及措辞要求。
+新建 PPT 默认使用点击逐组出现动画。用户要求无动画或整页一次性出现时，将 revealOnClick 设为 false。
 将用户资料中适合放在封面的汇报人、日期、关键数据、地点、编号和页脚原文填入 coverDetails。只给用户明确要求显示在封面上的可选字段设置 requiredCoverFields，其他字段由规划阶段选择。${presentationResources.logo ? "本轮用户已附上用于新 PPT 的封面 Logo，generatePresentation 会自动加入。" : "用户如明确要求使用品牌 Logo，可通过消息框的「封面 Logo」上传素材。"}
 查询、新增、删除或移动整页时，调用 addRemoveOrMoveSlides。先用 mode: "list" 读取当前 PPT 的页面目录，再用 mode: "edit" 一次提交同一份 PPT 的全部整页操作，按用户要求的顺序排列。默认把本轮用户提到的页码绑定到修改前目录的 slideId。例如「删除第 2 页，把第 5 页移到最前面」使用原第 2 页和原第 5 页的 ID。仅当用户明确指的是前面操作后的新页码时，才用 currentSlideNumber，例如「删掉第 2 页后，把新的第 5 页移到最前面」。如果用户说「把第 2 页移到第 5 页」，第 5 页是移动完成后的最终页码，据此用 before 或 after 选锚点。未指定插入位置时新增到末尾。新增页面使用简明的结构化文案，保留用户给出的精确文案，按版式使用 imageBriefs 填配图描述。常规配图用 image，图文解读页必填 image，双图对比页必填 leftImage 和 rightImage。页面目标不明确时先确认。同一轮还需修改页内元素时，改页序前先记下原页码对应的 ID，改页序后用返回的新目录确定页内工具所需的当前页码。
 修改已有文字或配图的内容、样式、位置、尺寸，或在原位置替换配图时，调用 updateSlideElements。一次提交同一份 PPT 中所有此类修改，也适用于「第二页再简洁一点」。用户给出页码时传入从 1 开始的 slideNumbers；按内容定位或全稿修改时省略。用 instructions 保留用户的全部要求和精确文案。需要复用聊天中的图片时，从 generateImage 的成功结果取图片 ID，附在 instructions 里并注明对应页面。
